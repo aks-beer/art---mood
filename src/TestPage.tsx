@@ -16,14 +16,14 @@ export default function TestPage({ groqKey, cerebrasKey, openRouterKey }: TestPa
   const [llmIsLoading, setLlmIsLoading] = useState<boolean>(false);
 
   // Museum Test State
-  const [museumProvider, setMuseumProvider] = useState<'chicago' | 'met' | 'cleveland'>('chicago');
+  const [museumProvider, setMuseumProvider] = useState<'chicago' | 'met' | 'cleveland' | 'rijks'>('chicago');
   const [museumQuery, setMuseumQuery] = useState<string>('cats');
   const [museumResponse, setMuseumResponse] = useState<string>('');
   const [museumIsLoading, setMuseumIsLoading] = useState<boolean>(false);
 
   // Pipeline Test State
   const [pipeLlm, setPipeLlm] = useState<'groq' | 'cerebras' | 'openrouter'>('groq');
-  const [pipeMuseum, setPipeMuseum] = useState<'chicago' | 'met' | 'cleveland'>('chicago');
+  const [pipeMuseum, setPipeMuseum] = useState<'chicago' | 'met' | 'cleveland' | 'rijks'>('chicago');
   const [pipeEmotion, setPipeEmotion] = useState<string>('грустно 🌧️');
   const [pipeIsLoading, setPipeIsLoading] = useState<boolean>(false);
   const [pipeLog, setPipeLog] = useState<string>('');
@@ -84,6 +84,8 @@ export default function TestPage({ groqKey, cerebrasKey, openRouterKey }: TestPa
         url = `/api/museum/search?q=${encodeURIComponent(museumQuery)}`;
       } else if (museumProvider === 'cleveland') {
         url = `/api/cma/search?q=${encodeURIComponent(museumQuery)}`;
+      } else if (museumProvider === 'rijks') {
+        url = `/api/rijks/search?q=${encodeURIComponent(museumQuery)}`;
       } else {
         url = `/api/met/search?q=${encodeURIComponent(museumQuery)}`;
       }
@@ -216,6 +218,26 @@ Return strictly JSON format: {"query": "keyword"}`
         if (!match) throw new Error("No CMA images found in top results.");
         foundImage = match.img;
         foundTitle = match.title;
+      } else if (pipeMuseum === 'rijks') {
+        const resSearch = await fetch(`/api/rijks/search?q=${encodeURIComponent(query)}`);
+        if (!resSearch.ok) throw new Error("Rijksmuseum Search failed");
+        const dataSearch = await resSearch.json();
+
+        const results = shuffle(dataSearch.data || []);
+
+        let match = null;
+        for (const a of results) {
+          if (a.visualId) {
+            const imgUrl = `/api/rijks/image?visual=${encodeURIComponent(a.visualId)}`;
+            if (await checkImage(imgUrl)) {
+              match = { img: imgUrl, title: a.title };
+              break;
+            }
+          }
+        }
+        if (!match) throw new Error("No Rijksmuseum images found in top results.");
+        foundImage = match.img;
+        foundTitle = match.title;
       } else {
         const resSearch = await fetch(`/api/museum/search?q=${encodeURIComponent(query)}&fields=id,title,image_id&limit=15`);
         if (!resSearch.ok) throw new Error("Chicago Search failed");
@@ -329,6 +351,7 @@ Return strictly JSON format: {"query": "keyword"}`
                 <option value="chicago">Art Institute of Chicago</option>
                 <option value="met">The Metropolitan Museum of Art</option>
                 <option value="cleveland">Cleveland Museum of Art</option>
+                <option value="rijks">Rijksmuseum (Amsterdam)</option>
               </select>
             </div>
 
@@ -405,6 +428,7 @@ Return strictly JSON format: {"query": "keyword"}`
                 <option value="chicago">Art Institute of Chicago</option>
                 <option value="met">The Met</option>
                 <option value="cleveland">Cleveland Museum of Art</option>
+                <option value="rijks">Rijksmuseum (Amsterdam)</option>
               </select>
             </div>
 

@@ -327,8 +327,8 @@ export default function App() {
 
 ПРАВИЛА:
 1. Называй РЕАЛЬНЫЕ известные картины с точным английским названием и именем автора.
-2. Предпочитай картины из коллекций The Metropolitan Museum of Art (The Met), Art Institute of Chicago и Cleveland Museum of Art — именно по ним идёт поиск.
-3. ВАЖНО: первые 4-5 предложений должны быть ВСЕМИРНО ИЗВЕСТНЫМИ, хрестоматийными шедеврами (например: Van Gogh, Monet, Renoir, Seurat, Rembrandt, El Greco, Hopper, Caillebotte, Degas, Cézanne), которые реально хранятся в этих трёх музеях. Ставь их ПЕРВЫМИ в списке. Остальные могут быть менее известными, но точно подходящими по сюжету.
+2. Предпочитай картины из коллекций The Metropolitan Museum of Art (The Met), Art Institute of Chicago, Cleveland Museum of Art и Rijksmuseum (Amsterdam) — именно по ним идёт поиск.
+3. ВАЖНО: первые 4-5 предложений должны быть ВСЕМИРНО ИЗВЕСТНЫМИ, хрестоматийными шедеврами (например: Van Gogh, Monet, Renoir, Seurat, Rembrandt, Vermeer, El Greco, Hopper, Caillebotte, Degas, Cézanne, Frans Hals), которые реально хранятся в этих музеях. Ставь их ПЕРВЫМИ в списке. Остальные могут быть менее известными, но точно подходящими по сюжету.
 4. Сюжет картины должен БУКВАЛЬНО подходить под эмоции. Запрещено выдумывать тайный смысл.
 5. Каждая картина должна быть от РАЗНОГО автора.
 6. НЕ генерируй описания — только название, автор и поисковый запрос.
@@ -389,7 +389,7 @@ ${historyBlock}
         imageUrl: string; // final image URL (proxied)
         museumDescription: string;
         medium: string;
-        source: 'chicago' | 'met' | 'cleveland';
+        source: 'chicago' | 'met' | 'cleveland' | 'rijks';
       }
 
       // Helper to check if image actually loads
@@ -493,6 +493,42 @@ ${historyBlock}
         } catch { return null; }
       };
 
+      // Helper: search Rijksmuseum (Amsterdam) — Linked Open Data, без ключа.
+      // Сервер уже отдаёт нормализованные кандидаты {id,title,artist,year,visualId}.
+      const searchRijks = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+        try {
+          const res = await fetch(`/api/rijks/search?q=${encodeURIComponent(query)}`);
+          if (!res.ok) return null;
+          const data = await res.json();
+          const results = (data.data || []) as any[];
+
+          for (const a of results) {
+            if (!a.title || !a.visualId) continue;
+
+            const matchesTitle = titlesMatch(suggestion.title, a.title);
+            const matchesArtist = artistsMatch(suggestion.artist, a.artist || '');
+
+            if (matchesTitle || matchesArtist) {
+              const imageUrl = `/api/rijks/image?visual=${encodeURIComponent(a.visualId)}`;
+              const isImageValid = await checkImage(imageUrl);
+              if (!isImageValid) continue;
+
+              return {
+                id: a.id,
+                title: a.title,
+                author: a.artist || suggestion.artist,
+                year: a.year || "Период неизвестен",
+                imageUrl,
+                museumDescription: '',
+                medium: '',
+                source: 'rijks' as const
+              };
+            }
+          }
+          return null;
+        } catch { return null; }
+      };
+
       const foundPaintings: FoundPainting[] = [];
       const newHistory = [...paintingHistory];
 
@@ -580,6 +616,14 @@ ${historyBlock}
           }
         }
 
+        // === FALLBACK 3: TRY RIJKSMUSEUM (европейские шедевры: Rembrandt, Vermeer) ===
+        if (!found) {
+          for (const query of queries) {
+            found = await searchRijks(query, suggestion);
+            if (found) break;
+          }
+        }
+
         if (!found) continue;
 
         // Skip duplicates
@@ -608,7 +652,7 @@ ${historyBlock}
 
       const descPrompt = `Настроение пользователя: "${currentUserState}".
 
-Вот ${foundPaintings.length} реальных картин из коллекций мировых музеев (The Metropolitan Museum of Art, Art Institute of Chicago, Cleveland Museum of Art) с их данными:
+Вот ${foundPaintings.length} реальных картин из коллекций мировых музеев (The Metropolitan Museum of Art, Art Institute of Chicago, Cleveland Museum of Art, Rijksmuseum) с их данными:
 
 ${paintingsInfo}
 
