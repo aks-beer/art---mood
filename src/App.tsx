@@ -327,10 +327,11 @@ export default function App() {
 
 ПРАВИЛА:
 1. Называй РЕАЛЬНЫЕ известные картины с точным английским названием и именем автора.
-2. Предпочитай картины из коллекций Art Institute of Chicago и The Metropolitan Museum of Art (The Met).
-3. Сюжет картины должен БУКВАЛЬНО подходить под эмоции. Запрещено выдумывать тайный смысл.
-4. Каждая картина должна быть от РАЗНОГО автора.
-5. НЕ генерируй описания — только название, автор и поисковый запрос.
+2. Предпочитай картины из коллекций The Metropolitan Museum of Art (The Met), Art Institute of Chicago и Cleveland Museum of Art — именно по ним идёт поиск.
+3. ВАЖНО: первые 4-5 предложений должны быть ВСЕМИРНО ИЗВЕСТНЫМИ, хрестоматийными шедеврами (например: Van Gogh, Monet, Renoir, Seurat, Rembrandt, El Greco, Hopper, Caillebotte, Degas, Cézanne), которые реально хранятся в этих трёх музеях. Ставь их ПЕРВЫМИ в списке. Остальные могут быть менее известными, но точно подходящими по сюжету.
+4. Сюжет картины должен БУКВАЛЬНО подходить под эмоции. Запрещено выдумывать тайный смысл.
+5. Каждая картина должна быть от РАЗНОГО автора.
+6. НЕ генерируй описания — только название, автор и поисковый запрос.
 
 ИСТОРИЯ (эти картины уже были показаны, НЕ ПРЕДЛАГАЙ их снова):
 ${historyBlock}
@@ -388,7 +389,7 @@ ${historyBlock}
         imageUrl: string; // final image URL (proxied)
         museumDescription: string;
         medium: string;
-        source: 'chicago' | 'met';
+        source: 'chicago' | 'met' | 'cleveland';
       }
 
       // Helper to check if image actually loads
@@ -443,6 +444,48 @@ ${historyBlock}
                 museumDescription: '',
                 medium: obj.medium || '',
                 source: 'met' as const
+              };
+            }
+          }
+          return null;
+        } catch { return null; }
+      };
+
+      // Helper: search Cleveland Museum of Art (CMA) — open access, CC0 images
+      const searchCleveland = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+        try {
+          const res = await fetch(`/api/cma/search?q=${encodeURIComponent(query)}`);
+          if (!res.ok) return null;
+          const data = await res.json();
+          const results = (data.data || []) as any[];
+
+          for (const a of results) {
+            if (a.type !== 'Painting') continue;
+            const webUrl = a.images?.web?.url || a.images?.print?.url;
+            if (!webUrl) continue;
+
+            const artistDesc: string = (a.creators && a.creators[0]?.description) || suggestion.artist;
+            const matchesTitle = titlesMatch(suggestion.title, a.title || '');
+            const matchesArtist = artistsMatch(suggestion.artist, artistDesc);
+
+            if (matchesTitle || matchesArtist) {
+              const imageUrl = `/api/cma/image?url=${encodeURIComponent(webUrl)}`;
+              const isImageValid = await checkImage(imageUrl);
+              if (!isImageValid) continue;
+
+              // "Rembrandt van Rijn (Dutch, 1606–1669)" -> "Rembrandt van Rijn"
+              const cleanArtist = artistDesc.split('(')[0].trim();
+              const museumDescription = (a.description || a.tombstone || '').replace(/<[^>]*>/g, '');
+
+              return {
+                id: a.id,
+                title: a.title,
+                author: cleanArtist || suggestion.artist,
+                year: a.creation_date || "Период неизвестен",
+                imageUrl,
+                museumDescription,
+                medium: a.technique || '',
+                source: 'cleveland' as const
               };
             }
           }
@@ -529,6 +572,14 @@ ${historyBlock}
           }
         }
 
+        // === FALLBACK 2: TRY CLEVELAND MUSEUM OF ART ===
+        if (!found) {
+          for (const query of queries) {
+            found = await searchCleveland(query, suggestion);
+            if (found) break;
+          }
+        }
+
         if (!found) continue;
 
         // Skip duplicates
@@ -557,7 +608,7 @@ ${historyBlock}
 
       const descPrompt = `Настроение пользователя: "${currentUserState}".
 
-Вот ${foundPaintings.length} реальных картин из коллекций мировых музеев (Art Institute of Chicago, The Metropolitan Museum of Art) с их данными:
+Вот ${foundPaintings.length} реальных картин из коллекций мировых музеев (The Metropolitan Museum of Art, Art Institute of Chicago, Cleveland Museum of Art) с их данными:
 
 ${paintingsInfo}
 

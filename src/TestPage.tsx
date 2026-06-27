@@ -16,14 +16,14 @@ export default function TestPage({ groqKey, cerebrasKey, openRouterKey }: TestPa
   const [llmIsLoading, setLlmIsLoading] = useState<boolean>(false);
 
   // Museum Test State
-  const [museumProvider, setMuseumProvider] = useState<'chicago' | 'met'>('chicago');
+  const [museumProvider, setMuseumProvider] = useState<'chicago' | 'met' | 'cleveland'>('chicago');
   const [museumQuery, setMuseumQuery] = useState<string>('cats');
   const [museumResponse, setMuseumResponse] = useState<string>('');
   const [museumIsLoading, setMuseumIsLoading] = useState<boolean>(false);
 
   // Pipeline Test State
   const [pipeLlm, setPipeLlm] = useState<'groq' | 'cerebras' | 'openrouter'>('groq');
-  const [pipeMuseum, setPipeMuseum] = useState<'chicago' | 'met'>('chicago');
+  const [pipeMuseum, setPipeMuseum] = useState<'chicago' | 'met' | 'cleveland'>('chicago');
   const [pipeEmotion, setPipeEmotion] = useState<string>('грустно 🌧️');
   const [pipeIsLoading, setPipeIsLoading] = useState<boolean>(false);
   const [pipeLog, setPipeLog] = useState<string>('');
@@ -82,6 +82,8 @@ export default function TestPage({ groqKey, cerebrasKey, openRouterKey }: TestPa
       let url = "";
       if (museumProvider === 'chicago') {
         url = `/api/museum/search?q=${encodeURIComponent(museumQuery)}`;
+      } else if (museumProvider === 'cleveland') {
+        url = `/api/cma/search?q=${encodeURIComponent(museumQuery)}`;
       } else {
         url = `/api/met/search?q=${encodeURIComponent(museumQuery)}`;
       }
@@ -191,6 +193,27 @@ Return strictly JSON format: {"query": "keyword"}`
           }
         }
         if (!match) throw new Error("No public domain images found in top results.");
+        foundImage = match.img;
+        foundTitle = match.title;
+      } else if (pipeMuseum === 'cleveland') {
+        const resSearch = await fetch(`/api/cma/search?q=${encodeURIComponent(query)}`);
+        if (!resSearch.ok) throw new Error("CMA Search failed");
+        const dataSearch = await resSearch.json();
+
+        const results = shuffle(dataSearch.data || []);
+
+        let match = null;
+        for (const a of results) {
+          const webUrl = a.images?.web?.url || a.images?.print?.url;
+          if (webUrl) {
+            const imgUrl = `/api/cma/image?url=${encodeURIComponent(webUrl)}`;
+            if (await checkImage(imgUrl)) {
+              match = { img: imgUrl, title: a.title };
+              break;
+            }
+          }
+        }
+        if (!match) throw new Error("No CMA images found in top results.");
         foundImage = match.img;
         foundTitle = match.title;
       } else {
@@ -305,6 +328,7 @@ Return strictly JSON format: {"query": "keyword"}`
               >
                 <option value="chicago">Art Institute of Chicago</option>
                 <option value="met">The Metropolitan Museum of Art</option>
+                <option value="cleveland">Cleveland Museum of Art</option>
               </select>
             </div>
 
@@ -380,6 +404,7 @@ Return strictly JSON format: {"query": "keyword"}`
               >
                 <option value="chicago">Art Institute of Chicago</option>
                 <option value="met">The Met</option>
+                <option value="cleveland">Cleveland Museum of Art</option>
               </select>
             </div>
 
