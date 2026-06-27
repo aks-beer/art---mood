@@ -13,22 +13,40 @@ import {
   Bookmark, 
   Maximize2,
   Zap,
-  RotateCcw
+  RotateCcw,
+  Settings
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { MuseumArtwork, ArtCardData, LLMPaintingSuggestion, PaintingHistoryEntry } from './types';
+import { MuseumArtwork, ArtCardData, LLMPaintingSuggestion, PaintingHistoryEntry, ProviderStatus } from './types';
+import TestPage from './TestPage';
 
-const EMOJIS = [
-  "😊", "😢", "🔥", "🌌", "😱", "❤️", "🤔", "🌊", 
-  "⚡", "🍂", "🎭", "🕊️", "💥", "🪐", "🍷", "🎧", 
-  "🌵", "☁️", "🏃", "🍔"
+const ALL_ART_EMOJIS = [
+  // Эмоции и состояния
+  "😊", "😢", "❤️", "💔", "😱", "🤔", "😌", "🤩", "😠", "😭", 
+  // Природа и стихии (пейзажи, марины)
+  "🌊", "☁️", "🍂", "🔥", "⚡", "🌪️", "❄️", "🌞", "🌙", "🌌", "🏔️", "🌿",
+  // Жизнь, смерть и символизм (натюрморты, memento mori)
+  "💀", "⏳", "🕯️", "🥀", "🌹", "🕊️", "🍎", "🍷", "🦋", "👁️",
+  // Общество, история, драма
+  "🎭", "⚔️", "🏰", "👑", "🎻", "🎨", "🚢", "🎪", "⛪"
 ];
 
 const MAX_MEMORY = 100;
 
 export default function App() {
+  const [currentView, setCurrentView] = useState<'main' | 'test'>('main');
+
   const [groqKey, setGroqKey] = useState<string>('');
+  const [cerebrasKey, setCerebrasKey] = useState<string>('');
+  const [openRouterKey, setOpenRouterKey] = useState<string>('');
+
+  const [groqStatus, setGroqStatus] = useState<ProviderStatus>('idle');
+  const [cerebrasStatus, setCerebrasStatus] = useState<ProviderStatus>('idle');
+  const [openRouterStatus, setOpenRouterStatus] = useState<ProviderStatus>('idle');
+
+  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isKeyVisible, setIsKeyVisible] = useState<boolean>(false);
+  const [displayedEmojis, setDisplayedEmojis] = useState<string[]>([]);
   const [selectedEmojis, setSelectedEmojis] = useState<string[]>([]);
   const [moodInput, setMoodInput] = useState<string>('');
   const [paintingHistory, setPaintingHistory] = useState<PaintingHistoryEntry[]>([]);
@@ -45,10 +63,18 @@ export default function App() {
 
   // Load configuration and history on mount
   useEffect(() => {
-    const savedKey = localStorage.getItem('groqApiKey');
-    if (savedKey) {
-      setGroqKey(savedKey);
-    }
+    // Pick 18 random art-related emojis to display
+    const shuffled = [...ALL_ART_EMOJIS].sort(() => 0.5 - Math.random());
+    setDisplayedEmojis(shuffled.slice(0, 18));
+
+    const savedGroq = localStorage.getItem('groqApiKey');
+    if (savedGroq) setGroqKey(savedGroq);
+
+    const savedCerebras = localStorage.getItem('cerebrasApiKey');
+    if (savedCerebras) setCerebrasKey(savedCerebras);
+
+    const savedOpenRouter = localStorage.getItem('openRouterApiKey');
+    if (savedOpenRouter) setOpenRouterKey(savedOpenRouter);
 
     const savedMemory = localStorage.getItem('artHistory');
     if (savedMemory) {
@@ -61,10 +87,18 @@ export default function App() {
   }, []);
 
   // Save key on change
-  const handleKeyChange = (val: string) => {
+  const handleKeyChange = (provider: 'groq' | 'cerebras' | 'openrouter', val: string) => {
     const cleaned = val.trim();
-    setGroqKey(cleaned);
-    localStorage.setItem('groqApiKey', cleaned);
+    if (provider === 'groq') {
+      setGroqKey(cleaned);
+      localStorage.setItem('groqApiKey', cleaned);
+    } else if (provider === 'cerebras') {
+      setCerebrasKey(cleaned);
+      localStorage.setItem('cerebrasApiKey', cleaned);
+    } else if (provider === 'openrouter') {
+      setOpenRouterKey(cleaned);
+      localStorage.setItem('openRouterApiKey', cleaned);
+    }
   };
 
   const toggleEmoji = (emoji: string) => {
@@ -94,6 +128,119 @@ export default function App() {
     }
   };
 
+  // Key validation
+  const validateKeys = async () => {
+    const testKey = async (url: string, key: string, setStatus: (status: ProviderStatus) => void) => {
+      if (!key) {
+        setStatus('idle');
+        return;
+      }
+      setStatus('testing');
+      try {
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${key}` } });
+        if (res.ok) {
+          setStatus('ok');
+        } else {
+          setStatus('error');
+        }
+      } catch (e) {
+        setStatus('error');
+      }
+    };
+
+    const p1 = testKey("https://api.groq.com/openai/v1/models", groqKey, setGroqStatus);
+    const p2 = testKey("https://api.cerebras.ai/v1/models", cerebrasKey, setCerebrasStatus);
+    const p3 = testKey("https://openrouter.ai/api/v1/models", openRouterKey, setOpenRouterStatus);
+    await Promise.all([p1, p2, p3]);
+  };
+
+  // Generic LLM fetcher with Fallback: Groq -> Cerebras -> OpenRouter
+  const fetchLLM = async (
+    prompt: string, 
+    isJson: boolean, 
+    temperature: number, 
+    groqModel: string, 
+    cerebrasModel: string
+  ): Promise<any> => {
+    let lastError = "";
+
+    // 1. Try Groq
+    if (groqKey && groqStatus !== 'error') {
+      try {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${groqKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: groqModel,
+            messages: [{ role: "user", content: prompt }],
+            response_format: isJson ? { type: "json_object" } : undefined,
+            temperature
+          })
+        });
+        if (res.ok) return await res.json();
+        lastError = `Groq ${res.status}`;
+      } catch (e: any) { lastError = `Groq Net Err`; }
+    }
+
+    // 2. Try Cerebras
+    if (cerebrasKey && cerebrasStatus !== 'error') {
+      try {
+        const res = await fetch("https://api.cerebras.ai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${cerebrasKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: cerebrasModel,
+            messages: [{ role: "user", content: prompt }],
+            response_format: isJson ? { type: "json_object" } : undefined,
+            temperature
+          })
+        });
+        if (res.ok) return await res.json();
+        lastError += ` | Cerebras ${res.status}`;
+      } catch (e: any) { lastError += ` | Cerebras Net Err`; }
+    }
+
+    // 3. Try OpenRouter (with fallback across free models on 429)
+    if (openRouterKey && openRouterStatus !== 'error') {
+      const openRouterModels = [
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "google/gemini-2.0-flash-lite-preview-02-05:free"
+      ];
+      
+      for (const orModel of openRouterModels) {
+        try {
+          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: { 
+              "Authorization": `Bearer ${openRouterKey}`, 
+              "Content-Type": "application/json",
+              "HTTP-Referer": window.location.href,
+              "X-Title": "Art and Mood" 
+            },
+            body: JSON.stringify({
+              model: orModel,
+              messages: [{ role: "user", content: prompt }],
+              response_format: isJson ? { type: "json_object" } : undefined,
+              temperature
+            })
+          });
+          if (res.ok) return await res.json();
+          lastError += ` | OR(${orModel.split('/')[1]}) ${res.status}`;
+          
+          if (res.status !== 429) {
+            break; // If it's not a rate limit error, stop trying OpenRouter
+          }
+        } catch (e: any) { 
+          lastError += ` | OpenRouter Net Err`; 
+          break; // Network error, stop trying OpenRouter
+        }
+      }
+    }
+
+    throw new Error(`Все доступные провайдеры недоступны. Ошибки: ${lastError}`);
+  };
+
   // Core 4-Stage Pipeline
   const processAIArt = async (isAppend: boolean = false) => {
     const currentUserState = `${selectedEmojis.join(' ')} ${moodInput}`.trim();
@@ -103,8 +250,8 @@ export default function App() {
       return;
     }
 
-    if (!groqKey || !groqKey.startsWith('gsk_')) {
-      setErrorMsg("Укажите верный ключ доступа Groq API (начинается с gsk_).");
+    if (!groqKey && !cerebrasKey && !openRouterKey) {
+      setErrorMsg("Укажите хотя бы один API ключ в настройках (Groq, Cerebras или OpenRouter).");
       return;
     }
 
@@ -112,6 +259,7 @@ export default function App() {
     setIsLoading(true);
 
     try {
+      await validateKeys();
       // ==========================================
       // ЭТАП 1: ГЕНЕРАЦИЯ КЛЮЧЕВЫХ СЛОВ (llama-3.1-8b-instant)
       // ==========================================
@@ -127,24 +275,7 @@ export default function App() {
 5. Если "плачу/грустно" -> ищи rain, ruins, tear, widow.
 Верни строго JSON: { "keywords": ["word1", "word2", "word3", "word4"] }`;
 
-      const keywordRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${groqKey}`, 
-          "Content-Type": "application/json" 
-        },
-        body: JSON.stringify({
-          model: "llama-3.1-8b-instant",
-          messages: [{ role: "user", content: keywordPrompt }],
-          response_format: { type: "json_object" }
-        })
-      });
-
-      if (!keywordRes.ok) {
-        throw new Error("Ошибка API Groq (слишком много запросов или неверный ключ).");
-      }
-      
-      const keywordData = await keywordRes.json();
+      const keywordData = await fetchLLM(keywordPrompt, true, 0, "llama-3.1-8b-instant", "gpt-oss-120b");
       const parsedKeywords = extractJSON(keywordData.choices[0].message.content).keywords as string[];
 
       if (!parsedKeywords || !Array.isArray(parsedKeywords) || parsedKeywords.length === 0) {
@@ -190,25 +321,7 @@ ${historyBlock}
   ]
 }`;
 
-      const suggestRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${groqKey}`, 
-          "Content-Type": "application/json" 
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [{ role: "user", content: suggestPrompt }],
-          response_format: { type: "json_object" },
-          temperature: 0.7
-        })
-      });
-
-      if (!suggestRes.ok) {
-        throw new Error("Сбой на этапе ИИ-куратора. Попробуйте еще раз.");
-      }
-
-      const suggestResult = await suggestRes.json();
+      const suggestResult = await fetchLLM(suggestPrompt, true, 0.7, "llama-3.3-70b-versatile", "gpt-oss-120b");
       const suggestions = extractJSON(suggestResult.choices[0].message.content).paintings as LLMPaintingSuggestion[];
 
       if (!suggestions || !Array.isArray(suggestions) || suggestions.length === 0) {
@@ -253,6 +366,16 @@ ${historyBlock}
         source: 'chicago' | 'met';
       }
 
+      // Helper to check if image actually loads
+      const checkImage = (url: string): Promise<boolean> => {
+        return new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve(true);
+          img.onerror = () => resolve(false);
+          img.src = url;
+        });
+      };
+
       // Helper: search Met Museum for a painting matching the suggestion
       const searchMet = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
         try {
@@ -280,27 +403,18 @@ ${historyBlock}
             const matchesTitle = titlesMatch(suggestion.title, obj.title || '');
             const matchesArtist = artistsMatch(suggestion.artist, obj.artistDisplayName || '');
 
-            if (matchesTitle && matchesArtist) {
-              return {
-                id: obj.objectID,
-                title: obj.title,
-                author: obj.artistDisplayName || suggestion.artist,
-                year: obj.objectDate || "Период неизвестен",
-                imageUrl: `/api/met/image?url=${encodeURIComponent(obj.primaryImage)}`,
-                museumDescription: '',
-                medium: obj.medium || '',
-                source: 'met' as const
-              };
-            }
+            if (matchesTitle || matchesArtist) {
+              const imageUrl = `/api/met/image?url=${encodeURIComponent(obj.primaryImage)}`;
+              // Verify the image is actually accessible
+              const isImageValid = await checkImage(imageUrl);
+              if (!isImageValid) continue;
 
-            // Fallback: title-only match
-            if (matchesTitle) {
               return {
                 id: obj.objectID,
                 title: obj.title,
                 author: obj.artistDisplayName || suggestion.artist,
                 year: obj.objectDate || "Период неизвестен",
-                imageUrl: `/api/met/image?url=${encodeURIComponent(obj.primaryImage)}`,
+                imageUrl,
                 museumDescription: '',
                 medium: obj.medium || '',
                 source: 'met' as const
@@ -319,69 +433,74 @@ ${historyBlock}
 
         let found: FoundPainting | null = null;
 
-        // === TRY ART INSTITUTE OF CHICAGO FIRST ===
+        // === TRY MET MUSEUM FIRST ===
         const queries = [suggestion.title, suggestion.search_query, `${suggestion.artist} ${suggestion.title}`];
-        let matchedArt: MuseumArtwork | null = null;
-
+        
         for (const query of queries) {
-          if (matchedArt) break;
-          try {
-            const res = await fetch(`/api/museum/search?q=${encodeURIComponent(query)}&fields=id,title,artist_display,image_id,artwork_type_title,date_display`);
-            if (!res.ok) continue;
-            const data = await res.json();
-            const results = (data.data || []) as MuseumArtwork[];
-
-            matchedArt = results.find(a =>
-              a.image_id &&
-              titlesMatch(suggestion.title, a.title) &&
-              artistsMatch(suggestion.artist, a.artist_display)
-            ) || null;
-
-            if (!matchedArt) {
-              matchedArt = results.find(a =>
-                a.image_id &&
-                titlesMatch(suggestion.title, a.title)
-              ) || null;
-            }
-          } catch { continue; }
+          found = await searchMet(query, suggestion);
+          if (found) break;
         }
 
-        if (matchedArt) {
-          const author = matchedArt.artist_display ? matchedArt.artist_display.split('\n')[0].trim() : suggestion.artist;
-
-          // Fetch Chicago detail
-          let museumDescription = '';
-          let medium = '';
-          try {
-            const detailRes = await fetch(`/api/museum/artwork/${matchedArt.id}`);
-            if (detailRes.ok) {
-              const detailData = await detailRes.json();
-              const d = detailData.data;
-              if (d) {
-                museumDescription = d.description || d.short_description || '';
-                medium = d.medium_display || '';
-                museumDescription = museumDescription.replace(/<[^>]*>/g, '');
-              }
-            }
-          } catch { /* continue */ }
-
-          found = {
-            id: matchedArt.id,
-            title: matchedArt.title,
-            author,
-            year: matchedArt.date_display || "Период неизвестен",
-            imageUrl: `/api/museum/image/${matchedArt.image_id}`,
-            museumDescription,
-            medium,
-            source: 'chicago'
-          };
-        }
-
-        // === FALLBACK: TRY MET MUSEUM ===
+        // === FALLBACK: TRY ART INSTITUTE OF CHICAGO ===
         if (!found) {
+          let matchedArt: MuseumArtwork | null = null;
+
           for (const query of queries) {
-            found = await searchMet(query, suggestion);
-            if (found) break;
+            if (matchedArt) break;
+            try {
+              const res = await fetch(`/api/museum/search?q=${encodeURIComponent(query)}&fields=id,title,artist_display,image_id,artwork_type_title,date_display`);
+              if (!res.ok) continue;
+              const data = await res.json();
+              const results = (data.data || []) as MuseumArtwork[];
+
+              // Filter to find the first valid match with a working image
+              for (const a of results) {
+                if (!a.image_id) continue;
+                
+                const matchesTitle = titlesMatch(suggestion.title, a.title);
+                const matchesArtist = artistsMatch(suggestion.artist, a.artist_display);
+
+                if (matchesTitle) { // Title match is good enough for fallback
+                  const imageUrl = `/api/museum/image/${a.image_id}`;
+                  const isImageValid = await checkImage(imageUrl);
+                  if (isImageValid) {
+                    matchedArt = a;
+                    break;
+                  }
+                }
+              }
+            } catch { continue; }
+          }
+
+          if (matchedArt) {
+            const author = matchedArt.artist_display ? matchedArt.artist_display.split('\n')[0].trim() : suggestion.artist;
+
+            // Fetch Chicago detail
+            let museumDescription = '';
+            let medium = '';
+            try {
+              const detailRes = await fetch(`/api/museum/artwork/${matchedArt.id}`);
+              if (detailRes.ok) {
+                const detailData = await detailRes.json();
+                const d = detailData.data;
+                if (d) {
+                  museumDescription = d.description || d.short_description || '';
+                  medium = d.medium_display || '';
+                  museumDescription = museumDescription.replace(/<[^>]*>/g, '');
+                }
+              }
+            } catch { /* continue */ }
+
+            found = {
+              id: matchedArt.id,
+              title: matchedArt.title,
+              author,
+              year: matchedArt.date_display || "Период неизвестен",
+              imageUrl: `/api/museum/image/${matchedArt.image_id}`,
+              museumDescription,
+              medium,
+              source: 'chicago'
+            };
           }
         }
 
@@ -427,6 +546,7 @@ ${paintingsInfo}
    - Третий абзац: Один удивительный факт о создании или судьбе картины. 1-2 предложения.
 
 ВАЖНО ПО СТИЛЮ:
+- ПИШИ СТРОГО НА ЧИСТОМ РУССКОМ ЯЗЫКЕ. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать китайские иероглифы.
 - НИКАКИХ эмодзи в тексте (🖼 ✨ 💡 и т.д.).
 - НИКАКИХ повторяющихся заголовков типа "Описание:", "Почему это круто:", "Интересный факт:".
 - Просто пиши три абзаца подряд, разделённых переносом строки (\\n\\n). Без заголовков, без маркеров.
@@ -445,25 +565,7 @@ ${paintingsInfo}
   ]
 }`;
 
-      const descRes = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-        method: "POST",
-        headers: { 
-          "Authorization": `Bearer ${groqKey}`, 
-          "Content-Type": "application/json" 
-        },
-        body: JSON.stringify({
-          model: "llama-3.3-70b-versatile",
-          messages: [{ role: "user", content: descPrompt }],
-          response_format: { type: "json_object" },
-          temperature: 0.3
-        })
-      });
-
-      if (!descRes.ok) {
-        throw new Error("Сбой при генерации описаний. Попробуйте еще раз.");
-      }
-
-      const descResult = await descRes.json();
+      const descResult = await fetchLLM(descPrompt, true, 0.3, "llama-3.3-70b-versatile", "gpt-oss-120b");
       const descriptions = extractJSON(descResult.choices[0].message.content).descriptions as { index: number; why_fits: string; about: string }[];
 
       // Build final cards
@@ -545,8 +647,32 @@ ${paintingsInfo}
       <div className="absolute top-0 left-1/4 w-96 h-96 bg-yellow-400/5 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute top-1/3 right-1/4 w-[30rem] h-[30rem] bg-amber-500/5 rounded-full blur-3xl pointer-events-none" />
 
-      <main className="max-w-7xl mx-auto px-6 pt-16 md:pt-24 relative z-10">
+      <main className="max-w-7xl mx-auto px-6 pt-8 md:pt-12 relative z-10">
         
+        {/* Navigation */}
+        <nav className="flex justify-center mb-8 space-x-4">
+          <button 
+            onClick={() => setCurrentView('main')}
+            className={`px-6 py-2 rounded-full text-sm font-bold tracking-wide transition-colors border ${currentView === 'main' ? 'bg-zinc-800 text-yellow-400 border-zinc-700 shadow-md' : 'bg-transparent text-zinc-500 border-transparent hover:text-zinc-300'}`}
+          >
+            Art & Mood App
+          </button>
+          <button 
+            onClick={() => setCurrentView('test')}
+            className={`px-6 py-2 rounded-full text-sm font-bold tracking-wide transition-colors border ${currentView === 'test' ? 'bg-zinc-800 text-yellow-400 border-zinc-700 shadow-md' : 'bg-transparent text-zinc-500 border-transparent hover:text-zinc-300'}`}
+          >
+            API Test Lab
+          </button>
+        </nav>
+
+        {currentView === 'test' ? (
+          <TestPage 
+            groqKey={groqKey} 
+            cerebrasKey={cerebrasKey} 
+            openRouterKey={openRouterKey} 
+          />
+        ) : (
+          <>
         {/* Header Block */}
         <header className="text-center mb-16">
           <motion.div 
@@ -578,7 +704,7 @@ ${paintingsInfo}
           </motion.p>
         </header>
 
-        {/* API Key Configuration Block */}
+        {/* API Keys Configuration Block */}
         <motion.div 
           initial={{ opacity: 0, y: 15 }}
           animate={{ opacity: 1, y: 0 }}
@@ -587,47 +713,88 @@ ${paintingsInfo}
         >
           <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl overflow-hidden transition-all duration-200">
             <button 
-              onClick={() => setIsKeyVisible(!isKeyVisible)}
+              onClick={() => setIsSettingsOpen(!isSettingsOpen)}
               className="w-full flex items-center justify-between p-5 text-sm text-zinc-300 hover:text-white transition-colors select-none"
             >
               <span className="flex items-center gap-3 font-medium">
-                <Key className="w-4 h-4 text-yellow-400" />
-                Ключ доступа Groq API
-                {groqKey && groqKey.startsWith('gsk_') ? (
+                <Settings className="w-4 h-4 text-yellow-400" />
+                Настройки AI-моделей (Резервные ключи)
+                {(groqKey || cerebrasKey || openRouterKey) ? (
                   <span className="inline-flex items-center gap-1 text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded">
-                    <Check className="w-2.5 h-2.5" /> подключен
+                    <Check className="w-2.5 h-2.5" /> ключи настроены
                   </span>
                 ) : (
                   <span className="inline-flex items-center gap-1 text-[10px] bg-yellow-500/10 text-yellow-500 border border-yellow-500/20 px-2 py-0.5 rounded">
-                    требуется ключ
+                    требуются ключи
                   </span>
                 )}
               </span>
-              <ChevronDown className={`w-4 h-4 transition-transform duration-300 ${isKeyVisible ? 'rotate-180' : ''} text-zinc-500`} />
+              <ChevronDown className={`w-4 h-4 transition-transform duration-300 ${isSettingsOpen ? 'rotate-180' : ''} text-zinc-500`} />
             </button>
             
             <AnimatePresence>
-              {isKeyVisible && (
+              {isSettingsOpen && (
                 <motion.div 
                   initial={{ height: 0, opacity: 0 }}
                   animate={{ height: "auto", opacity: 1 }}
                   exit={{ height: 0, opacity: 0 }}
                   transition={{ duration: 0.25 }}
-                  className="border-t border-zinc-850 bg-zinc-950/40 p-5"
+                  className="border-t border-zinc-850 bg-zinc-950/40 p-5 space-y-4"
                 >
-                  <label className="block text-xs text-zinc-400 font-semibold uppercase tracking-wider mb-2">
-                    Groq API Key (gsk_...)
-                  </label>
-                  <input 
-                    type="password" 
-                    value={groqKey}
-                    onChange={(e) => handleKeyChange(e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-700/60 rounded-xl px-5 py-3.5 text-sm focus:outline-none focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400 transition-all text-zinc-200 placeholder-zinc-600 font-mono"
-                    placeholder="Вставьте ваш gsk_... ключ (хранится локально в вашем браузере)"
-                  />
-                  <p className="mt-2 text-xs text-zinc-500 leading-relaxed">
-                    Ключ используется для прямых запросов к Groq моделям <code className="text-zinc-400 font-mono">llama-3.1-8b</code> и <code className="text-zinc-400 font-mono">llama-3.3-70b</code> прямо из вашего браузера. Получить ключ можно бесплатно на <a href="https://console.groq.com/" target="_blank" rel="noopener noreferrer" className="text-yellow-400 hover:underline">console.groq.com</a>.
+                  <p className="text-xs text-zinc-500 leading-relaxed mb-4">
+                    Укажите API ключи для бесперебойной работы. Система будет использовать их по очереди: <b>Groq → Cerebras → OpenRouter</b>. Перед генерацией система проверит каждый ключ.
                   </p>
+
+                  {/* Groq Key */}
+                  <div>
+                    <label className="flex items-center justify-between text-xs text-zinc-400 font-semibold uppercase tracking-wider mb-2">
+                      <span>1. Groq API Key (Основной)</span>
+                      {groqStatus === 'ok' && <span className="text-emerald-400 text-[10px]">✅ Готов</span>}
+                      {groqStatus === 'error' && <span className="text-red-400 text-[10px]">❌ Ошибка</span>}
+                      {groqStatus === 'testing' && <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />}
+                    </label>
+                    <input 
+                      type="password" 
+                      value={groqKey}
+                      onChange={(e) => handleKeyChange('groq', e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700/60 rounded-xl px-5 py-3.5 text-sm focus:outline-none focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400 transition-all text-zinc-200 placeholder-zinc-600 font-mono mb-1"
+                      placeholder="gsk_..."
+                    />
+                  </div>
+
+                  {/* Cerebras Key */}
+                  <div>
+                    <label className="flex items-center justify-between text-xs text-zinc-400 font-semibold uppercase tracking-wider mb-2">
+                      <span>2. Cerebras API Key (Резерв 1)</span>
+                      {cerebrasStatus === 'ok' && <span className="text-emerald-400 text-[10px]">✅ Готов</span>}
+                      {cerebrasStatus === 'error' && <span className="text-red-400 text-[10px]">❌ Ошибка</span>}
+                      {cerebrasStatus === 'testing' && <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />}
+                    </label>
+                    <input 
+                      type="password" 
+                      value={cerebrasKey}
+                      onChange={(e) => handleKeyChange('cerebras', e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700/60 rounded-xl px-5 py-3.5 text-sm focus:outline-none focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400 transition-all text-zinc-200 placeholder-zinc-600 font-mono mb-1"
+                      placeholder="csk_..."
+                    />
+                  </div>
+
+                  {/* OpenRouter Key */}
+                  <div>
+                    <label className="flex items-center justify-between text-xs text-zinc-400 font-semibold uppercase tracking-wider mb-2">
+                      <span>3. OpenRouter API Key (Резерв 2)</span>
+                      {openRouterStatus === 'ok' && <span className="text-emerald-400 text-[10px]">✅ Готов</span>}
+                      {openRouterStatus === 'error' && <span className="text-red-400 text-[10px]">❌ Ошибка</span>}
+                      {openRouterStatus === 'testing' && <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />}
+                    </label>
+                    <input 
+                      type="password" 
+                      value={openRouterKey}
+                      onChange={(e) => handleKeyChange('openrouter', e.target.value)}
+                      className="w-full bg-zinc-900 border border-zinc-700/60 rounded-xl px-5 py-3.5 text-sm focus:outline-none focus:border-yellow-400 focus:ring-1 focus:ring-yellow-400 transition-all text-zinc-200 placeholder-zinc-600 font-mono mb-1"
+                      placeholder="sk-or-v1-..."
+                    />
+                  </div>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -647,7 +814,7 @@ ${paintingsInfo}
               <span className="text-yellow-400 text-lg">😊</span> Выберите ваши эмоции (до 3)
             </h2>
             <div className="flex flex-wrap gap-2.5 justify-center md:justify-start">
-              {EMOJIS.map(emoji => {
+              {displayedEmojis.map(emoji => {
                 const isActive = selectedEmojis.includes(emoji);
                 return (
                   <button
@@ -825,6 +992,8 @@ ${paintingsInfo}
             </button>
           </div>
         </section>
+        </>
+        )}
       </main>
 
       {/* Full-Screen Exhibition Modal */}

@@ -42,3 +42,5 @@ export interface ArtCardData {
   about: string;
   userState: string;
 }
+
+export type ProviderStatus = 'idle' | 'testing' | 'ok' | 'error';
