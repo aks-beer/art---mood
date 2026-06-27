@@ -212,34 +212,53 @@ export default function App() {
         "openai/gpt-oss-120b:free"
       ];
 
-      for (const orModel of openRouterModels) {
-        try {
-          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${openRouterKey}`,
-              "Content-Type": "application/json",
-              "HTTP-Referer": window.location.href,
-              "X-Title": "Art and Mood"
-            },
-            body: JSON.stringify({
-              model: orModel,
-              messages: [{ role: "user", content: prompt }],
-              response_format: isJson ? { type: "json_object" } : undefined,
-              temperature
-            })
-          });
-          if (res.ok) return await res.json();
-          const modelLabel = orModel.split('/')[1] || orModel;
-          lastError += ` | OR(${modelLabel}) ${res.status}`;
+      // Кол-во повторов при 429. Бесплатные модели часто отдают временный
+      // "rate-limited upstream", но openrouter/free при каждом повторе
+      // перевыбирает другую модель, поэтому короткий ретрай обычно срабатывает.
+      const MAX_429_RETRIES = 3;
+      let stopOpenRouter = false;
 
-          // При 429 (rate limit) пробуем следующую модель из списка, иначе прекращаем.
-          if (res.status !== 429) {
+      for (const orModel of openRouterModels) {
+        if (stopOpenRouter) break;
+        const modelLabel = orModel.split('/')[1] || orModel;
+
+        for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+          try {
+            const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${openRouterKey}`,
+                "Content-Type": "application/json",
+                "HTTP-Referer": window.location.href,
+                "X-Title": "Art and Mood"
+              },
+              body: JSON.stringify({
+                model: orModel,
+                messages: [{ role: "user", content: prompt }],
+                response_format: isJson ? { type: "json_object" } : undefined,
+                temperature
+              })
+            });
+            if (res.ok) return await res.json();
+            lastError += ` | OR(${modelLabel}) ${res.status}`;
+
+            if (res.status === 429) {
+              // Временный rate-limit: ждём ~1.5с и повторяем (роутер re-roll).
+              if (attempt < MAX_429_RETRIES) {
+                await new Promise(r => setTimeout(r, 1500));
+                continue;
+              }
+              break; // ретраи исчерпаны — пробуем следующую модель из списка
+            }
+
+            // Не-429 ошибка (auth/bad request) — нет смысла продолжать OpenRouter.
+            stopOpenRouter = true;
             break;
+          } catch (e: any) {
+            lastError += ` | OpenRouter Net Err`;
+            stopOpenRouter = true;
+            break; // Network error, stop trying OpenRouter
           }
-        } catch (e: any) {
-          lastError += ` | OpenRouter Net Err`;
-          break; // Network error, stop trying OpenRouter
         }
       }
     }
