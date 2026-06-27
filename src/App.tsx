@@ -203,20 +203,24 @@ export default function App() {
     // 3. Try OpenRouter (with fallback across free models on 429)
     if (openRouterKey && openRouterStatus !== 'error') {
       const openRouterModels = [
+        // openrouter/free — официальный роутер OpenRouter: сам выбирает доступную
+        // бесплатную модель из ~24 и фильтрует по нужным фичам (JSON/structured outputs).
+        // Это обходит ситуацию, когда конкретная free-модель временно rate-limited upstream.
+        "openrouter/free",
+        // Запасные конкретные free-модели на случай, если роутер вернёт ошибку.
         "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "google/gemini-2.0-flash-lite-preview-02-05:free"
+        "openai/gpt-oss-120b:free"
       ];
-      
+
       for (const orModel of openRouterModels) {
         try {
           const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
             method: "POST",
-            headers: { 
-              "Authorization": `Bearer ${openRouterKey}`, 
+            headers: {
+              "Authorization": `Bearer ${openRouterKey}`,
               "Content-Type": "application/json",
               "HTTP-Referer": window.location.href,
-              "X-Title": "Art and Mood" 
+              "X-Title": "Art and Mood"
             },
             body: JSON.stringify({
               model: orModel,
@@ -226,13 +230,15 @@ export default function App() {
             })
           });
           if (res.ok) return await res.json();
-          lastError += ` | OR(${orModel.split('/')[1]}) ${res.status}`;
-          
+          const modelLabel = orModel.split('/')[1] || orModel;
+          lastError += ` | OR(${modelLabel}) ${res.status}`;
+
+          // При 429 (rate limit) пробуем следующую модель из списка, иначе прекращаем.
           if (res.status !== 429) {
-            break; // If it's not a rate limit error, stop trying OpenRouter
+            break;
           }
-        } catch (e: any) { 
-          lastError += ` | OpenRouter Net Err`; 
+        } catch (e: any) {
+          lastError += ` | OpenRouter Net Err`;
           break; // Network error, stop trying OpenRouter
         }
       }

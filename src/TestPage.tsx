@@ -57,7 +57,7 @@ export default function TestPage({ groqKey, cerebrasKey, openRouterKey }: TestPa
         headers["Authorization"] = `Bearer ${openRouterKey}`;
         headers["HTTP-Referer"] = window.location.href;
         headers["X-Title"] = "Art and Mood Test";
-        body.model = "meta-llama/llama-3.3-70b-instruct:free";
+        body.model = "openrouter/free";
       }
 
       const res = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
@@ -146,7 +146,7 @@ Return strictly JSON format: {"query": "keyword"}`
         url = "https://openrouter.ai/api/v1/chat/completions";
         headers["Authorization"] = `Bearer ${openRouterKey}`;
         headers["HTTP-Referer"] = window.location.href;
-        body.model = "meta-llama/llama-3.3-70b-instruct:free";
+        body.model = "openrouter/free";
       }
 
       const resLlm = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
@@ -256,7 +256,7 @@ Return strictly JSON format: {"query": "keyword"}`
               >
                 <option value="groq">Groq (llama-3.1-8b-instant)</option>
                 <option value="cerebras">Cerebras (gpt-oss-120b)</option>
-                <option value="openrouter">OpenRouter (llama-3.3-70b-instruct:free)</option>
+                <option value="openrouter">OpenRouter (openrouter/free)</option>
               </select>
             </div>
 
