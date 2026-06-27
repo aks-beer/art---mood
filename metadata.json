@@ -1,6 +1,5 @@
 {
   "name": "Art & Mood",
   "description": "AI-Куратор классической живописи под ваше настроение",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "requestFramePermissions": []
 }

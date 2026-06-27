@@ -1,20 +1,54 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Art & Mood — Искусство под настроение
 
-# Run and deploy your AI Studio app
+Веб-приложение, которое подбирает **реальные** картины из мировых музеев под настроение пользователя. Пользователь выбирает эмодзи и/или описывает свои эмоции текстом, а ИИ находит классические произведения из коллекций **The Metropolitan Museum of Art** и **Art Institute of Chicago**, которые визуально и тематически резонируют с его состоянием.
 
-This contains everything you need to run your app locally.
+В отличие от генеративного AI-арта, здесь все картины настоящие — с реальными авторами, датами, описаниями и музейными изображениями.
 
-View your app in AI Studio: https://ai.studio/apps/6c1222fb-b9be-427b-94b9-f11750169e3e
+## Технологический стек
 
-## Run Locally
+- **Frontend:** React 19 + TypeScript
+- **Стилизация:** TailwindCSS 4
+- **Анимации:** Framer Motion (`motion/react`)
+- **Иконки:** Lucide React
+- **Сервер:** Express.js (через `tsx`) — прокси к музейным API
+- **Сборка:** Vite 6 + esbuild
+- **LLM:** Groq / Cerebras / OpenRouter (бесплатные API, каскадный фолбэк)
+- **Музейные данные:** Art Institute of Chicago API + Met Museum API
 
-**Prerequisites:**  Node.js
+## Как это работает
 
+4-этапный пайплайн (весь код в [`src/App.tsx`](src/App.tsx)):
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+1. **Семантический разбор** (`llama-3.1-8b-instant`) — эмоции пользователя превращаются в 4 конкретных английских существительных для поиска.
+2. **ИИ-куратор** (`llama-3.3-70b-versatile`) — предлагает 12 конкретных классических картин с учётом истории просмотров.
+3. **Поиск в музеях** — Met (приоритет) → Chicago (фолбэк). Фаззи-матчинг по названию/автору + реальная проверка загрузки изображения. Отбираются первые 3 найденные.
+4. **Генерация описаний** — на основе реальных музейных данных ИИ пишет, почему картина подходит, и развёрнутое описание.
+
+Подробная документация: [`project_documentation.md`](project_documentation.md) (если присутствует).
+
+## Запуск локально
+
+**Требования:** Node.js
+
+1. Установите зависимости:
+   ```bash
+   npm install
+   ```
+2. Запустите приложение:
+   ```bash
+   npm run dev
+   ```
+   Откройте http://localhost:3000
+
+API-ключи (Groq / Cerebras / OpenRouter) **не нужны в окружении** — они вводятся прямо в UI приложения (раздел «Настройки AI-моделей») и хранятся только в `localStorage` браузера. Нужен хотя бы один из трёх. Бесплатные ключи:
+
+- Groq — https://console.groq.com/keys
+- Cerebras — https://cloud.cerebras.ai
+- OpenRouter — https://openrouter.ai/keys
+
+## Сборка для продакшена
+
+```bash
+npm run build   # собирает фронтенд (Vite) и сервер (esbuild → dist/server.cjs)
+npm run start   # запускает собранный сервер
+```
