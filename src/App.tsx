@@ -45,6 +45,9 @@ const MAX_MEMORY = 100;
 const stripForeignGlyphs = (s: string): string =>
   (s || '')
     .replace(/[　-〿぀-ヿㇰ-ㇿ㈀-鿿ꀀ-꓏가-힯豈-﫿＀-￯]/g, '')
+    // целиком убираем слова с вьетнамскими диакритиками (Latin Extended Additional),
+    // которые иногда подмешивает LLM (напр. "thuộc kệ"); кириллица/латиница целы.
+    .replace(/\S*[Ḁ-ỿ]\S*/g, '')
     .replace(/[ \t]{2,}/g, ' ')
     .replace(/\s+([,.!?;:])/g, '$1')
     .trim();
@@ -651,7 +654,9 @@ ${historyBlock}
               if (hit.source === 'chicago') imageUrl = `/api/museum/image/${hit.image}`;
               else if (hit.source === 'cleveland') imageUrl = `/api/cma/image?url=${encodeURIComponent(hit.image)}`;
               else if (hit.source === 'met') imageUrl = `/api/met/image?url=${encodeURIComponent(hit.image)}`;
-              if (imageUrl) {
+              // Проверяем, что картинка реально грузится (иначе уйдём в живой поиск,
+              // и битая картинка не попадёт ни в выдачу, ни в историю).
+              if (imageUrl && (await checkImage(imageUrl))) {
                 found = {
                   id: hit.id, title: hit.title, author: hit.artist || suggestion.artist,
                   year: hit.year || "Период неизвестен", imageUrl,
@@ -731,24 +736,25 @@ ${historyBlock}
         return found;
       };
 
+      const DISPLAY = 3;   // сколько карточек показываем
+      const TARGET = 6;    // сколько кандидатов набираем с запасом (на отсев гейтом релевантности)
       const foundPaintings: FoundPainting[] = [];
-      const newHistory = [...paintingHistory];
+      // Что уже показано раньше (история) — чтобы не повторяться.
+      const seenTitles = new Set(paintingHistory.map(h => h.title.toLowerCase()));
 
-      // Параллельный поиск: предложения обрабатываются батчами (быстрее, чем по
-      // одному), останавливаемся как только набрали 3 уникальные картины.
+      // Параллельный поиск батчами: набираем с ЗАПАСОМ (TARGET), чтобы после гейта
+      // релевантности (Этап 3) осталось чем заполнить DISPLAY карточек.
       const BATCH = 4;
-      for (let i = 0; i < suggestions.length && foundPaintings.length < 3; i += BATCH) {
+      for (let i = 0; i < suggestions.length && foundPaintings.length < TARGET; i += BATCH) {
         const batch = suggestions.slice(i, i + BATCH);
         const results = await Promise.all(batch.map(s => findOnePainting(s, isAppend)));
         for (const found of results) {
-          if (foundPaintings.length >= 3) break;
+          if (foundPaintings.length >= TARGET) break;
           if (!found) continue;
           const t = found.title.toLowerCase();
-          // Дедупликация против истории и внутри текущей выборки.
-          if (newHistory.some(h => h.title.toLowerCase() === t)) continue;
-          if (foundPaintings.some(p => p.title.toLowerCase() === t)) continue;
+          if (seenTitles.has(t)) continue; // дедуп против истории и внутри выборки
+          seenTitles.add(t);
           foundPaintings.push(found);
-          newHistory.push({ title: found.title, artist: found.author });
         }
       }
 
@@ -845,10 +851,10 @@ ${paintingsInfo}
       // Признаки оговорки о несоответствии — такие карточки не показываем.
       const mismatchRe = /не\s+имеет\s+(прямого\s+)?отношени|не\s+связан|не\s+перекликает|не\s+напрямую|может\s+не\s+|не\s+соответств|отношения\s+к\s+настроени/i;
 
-      // Build final cards — отсеиваем картины, которые НЕ подходят под настроение.
+      // Build final cards — отсеиваем нерелевантные (гейт fits), берём первые DISPLAY.
       const selectedCards: ArtCardData[] = [];
 
-      for (let i = 0; i < foundPaintings.length; i++) {
+      for (let i = 0; i < foundPaintings.length && selectedCards.length < DISPLAY; i++) {
         const p = foundPaintings[i];
         const desc = descriptions?.find(d => d.index === i);
 
@@ -872,7 +878,9 @@ ${paintingsInfo}
         throw new Error("Не нашлось картин, по-настоящему подходящих под это настроение. Попробуйте другие эмодзи или опишите настроение словами.");
       }
 
-      // Trim history if it exceeds limit
+      // В историю пишем ТОЛЬКО показанные картины (непоказанные кандидаты смогут
+      // появиться при следующем «Подобрать ещё»).
+      const newHistory = [...paintingHistory, ...selectedCards.map(c => ({ title: c.title, artist: c.author }))];
       if (newHistory.length > MAX_MEMORY) {
         newHistory.splice(0, newHistory.length - MAX_MEMORY);
       }
