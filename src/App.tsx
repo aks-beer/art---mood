@@ -312,6 +312,9 @@ export default function App() {
 - Море / шторм -> марины, корабли, волны (Turner, Aivazovsky, Winslow Homer, Hokusai).
 - Грусть / слёзы -> дождь, руины, одиночество, вдовы, сумерки.
 - Гнев / всё бесит -> бури, битвы, огонь.
+- Смерть / 💀 / memento mori -> ЧЕРЕПА, vanitas, натюрморты с черепом, увядающие цветы, сцены смерти и погребения, кости.
+- Любовь / ❤️ -> влюблённые, объятия, поцелуй, нежные сцены.
+- Страх / 😱 -> кошмары, мрак, чудовища, бури (например Henry Fuseli "The Nightmare").
 - Голод -> натюрморты с едой: хлеб, фрукты, рыба, дичь.
 - Спокойствие / умиротворение -> тихие пейзажи, светлые интерьеры, сады.
 Подбирай ОБРАЗ под эмоцию, а не абстракцию.
@@ -319,7 +322,7 @@ export default function App() {
 ПРАВИЛА:
 1. Только РЕАЛЬНЫЕ существующие картины, точное английское название + имя автора.
 2. Первые 4-5 — всемирно известные хрестоматийные шедевры (Van Gogh, Monet, Renoir, Seurat, Rembrandt, Vermeer, El Greco, Hopper, Caillebotte, Degas, Cézanne, Frans Hals, Turner), реально хранящиеся в The Met, Art Institute of Chicago, Cleveland Museum of Art или Rijksmuseum — именно по ним идёт поиск. Ставь их ПЕРВЫМИ.
-3. Сюжет/тема картины должны ПРЯМО соответствовать эмоции. Не выдумывай надуманные связи.
+3. СТРОГО ПО ТЕМЕ: сюжет КАЖДОЙ картины должен явно и узнаваемо соответствовать эмоции. Если связь натянутая или это просто "красивая работа того же автора" — НЕ включай её. Лучше предложить меньше, но строго по теме.
 4. Каждая картина — от РАЗНОГО автора.
 5. Только название, автор и поисковый запрос. Без описаний.
 
@@ -358,13 +361,6 @@ ${historyBlock}
         if (llmWords.length === 0) return false;
         const matched = llmWords.filter(w => museumNorm.includes(w));
         return matched.length / llmWords.length >= 0.5;
-      };
-
-      const artistsMatch = (llmArtist: string, museumArtist: string | null): boolean => {
-        if (!museumArtist) return false;
-        const llmParts = normalize(llmArtist).split(/\s+/).filter(w => w.length > 2);
-        const museumNorm = normalize(museumArtist.split('\n')[0]);
-        return llmParts.some(w => museumNorm.includes(w));
       };
 
       interface FoundPainting {
@@ -413,10 +409,13 @@ ${historyBlock}
             if (!obj.primaryImage || !obj.isPublicDomain) continue;
             if (obj.classification !== 'Paintings' && obj.objectName !== 'Painting') continue;
 
+            // Требуем совпадение НАЗВАНИЯ (это и есть сюжет/тема). Совпадение
+            // ТОЛЬКО по автору давало нерелевантные работы того же художника
+            // (напр. под 💀 куратор просил мрачную работу Géricault, а находился
+            // его же "Вечер: пейзаж с акведуком") — больше не принимаем.
             const matchesTitle = titlesMatch(suggestion.title, obj.title || '');
-            const matchesArtist = artistsMatch(suggestion.artist, obj.artistDisplayName || '');
 
-            if (matchesTitle || matchesArtist) {
+            if (matchesTitle) {
               const imageUrl = `/api/met/image?url=${encodeURIComponent(obj.primaryImage)}`;
               // Verify the image is actually accessible
               const isImageValid = await checkImage(imageUrl);
@@ -460,10 +459,10 @@ ${historyBlock}
             if (!webUrl) continue;
 
             const artistDesc: string = (a.creators && a.creators[0]?.description) || suggestion.artist;
+            // Требуем совпадение НАЗВАНИЯ (сюжет), а не только автора.
             const matchesTitle = titlesMatch(suggestion.title, a.title || '');
-            const matchesArtist = artistsMatch(suggestion.artist, artistDesc);
 
-            if (matchesTitle || matchesArtist) {
+            if (matchesTitle) {
               const imageUrl = `/api/cma/image?url=${encodeURIComponent(webUrl)}`;
               const isImageValid = await checkImage(imageUrl);
               if (!isImageValid) continue;
@@ -500,10 +499,10 @@ ${historyBlock}
           for (const a of results) {
             if (!a.title || !a.visualId) continue;
 
+            // Требуем совпадение НАЗВАНИЯ (сюжет), а не только автора.
             const matchesTitle = titlesMatch(suggestion.title, a.title);
-            const matchesArtist = artistsMatch(suggestion.artist, a.artist || '');
 
-            if (matchesTitle || matchesArtist) {
+            if (matchesTitle) {
               const imageUrl = `/api/rijks/image?visual=${encodeURIComponent(a.visualId)}`;
               const isImageValid = await checkImage(imageUrl);
               if (!isImageValid) continue;
@@ -557,9 +556,8 @@ ${historyBlock}
                 if (!a.image_id) continue;
                 
                 const matchesTitle = titlesMatch(suggestion.title, a.title);
-                const matchesArtist = artistsMatch(suggestion.artist, a.artist_display);
 
-                if (matchesTitle) { // Title match is good enough for fallback
+                if (matchesTitle) { // Совпадение названия = совпадение сюжета
                   const imageUrl = `/api/museum/image/${a.image_id}`;
                   const isImageValid = await checkImage(imageUrl);
                   if (isImageValid) {
