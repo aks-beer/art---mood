@@ -398,7 +398,8 @@ ${historyBlock}
       // Helpers for matching
       const normalize = (s: string) => s.toLowerCase().replace(/[^a-zа-яё0-9\s]/gi, '').trim();
 
-      const titlesMatch = (llmTitle: string, museumTitle: string): boolean => {
+      // relaxed (для "Подобрать ещё") снижает порог совпадения значимых слов.
+      const titlesMatch = (llmTitle: string, museumTitle: string, relaxed = false): boolean => {
         const llmNorm = normalize(llmTitle);
         const museumNorm = normalize(museumTitle);
         if (llmNorm === museumNorm) return true;
@@ -407,7 +408,7 @@ ${historyBlock}
         const llmWords = llmNorm.split(/\s+/).filter(w => w.length > 1 && !stopWords.has(w));
         if (llmWords.length === 0) return false;
         const matched = llmWords.filter(w => museumNorm.includes(w));
-        return matched.length / llmWords.length >= 0.5;
+        return matched.length / llmWords.length >= (relaxed ? 0.34 : 0.5);
       };
 
       interface FoundPainting {
@@ -433,7 +434,7 @@ ${historyBlock}
       };
 
       // Helper: search Met Museum for a painting matching the suggestion
-      const searchMet = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+      const searchMet = async (query: string, suggestion: LLMPaintingSuggestion, relaxed = false): Promise<FoundPainting | null> => {
         try {
           const searchRes = await fetch(`/api/met/search?q=${encodeURIComponent(query)}`);
           if (!searchRes.ok) return null;
@@ -460,7 +461,7 @@ ${historyBlock}
             // ТОЛЬКО по автору давало нерелевантные работы того же художника
             // (напр. под 💀 куратор просил мрачную работу Géricault, а находился
             // его же "Вечер: пейзаж с акведуком") — больше не принимаем.
-            const matchesTitle = titlesMatch(suggestion.title, obj.title || '');
+            const matchesTitle = titlesMatch(suggestion.title, obj.title || '', relaxed);
 
             if (matchesTitle) {
               const imageUrl = `/api/met/image?url=${encodeURIComponent(obj.primaryImage)}`;
@@ -493,7 +494,7 @@ ${historyBlock}
       };
 
       // Helper: search Cleveland Museum of Art (CMA) — open access, CC0 images
-      const searchCleveland = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+      const searchCleveland = async (query: string, suggestion: LLMPaintingSuggestion, relaxed = false): Promise<FoundPainting | null> => {
         try {
           const res = await fetch(`/api/cma/search?q=${encodeURIComponent(query)}`);
           if (!res.ok) return null;
@@ -507,7 +508,7 @@ ${historyBlock}
 
             const artistDesc: string = (a.creators && a.creators[0]?.description) || suggestion.artist;
             // Требуем совпадение НАЗВАНИЯ (сюжет), а не только автора.
-            const matchesTitle = titlesMatch(suggestion.title, a.title || '');
+            const matchesTitle = titlesMatch(suggestion.title, a.title || '', relaxed);
 
             if (matchesTitle) {
               const imageUrl = `/api/cma/image?url=${encodeURIComponent(webUrl)}`;
@@ -536,7 +537,7 @@ ${historyBlock}
 
       // Helper: search Rijksmuseum (Amsterdam) — Linked Open Data, без ключа.
       // Сервер уже отдаёт нормализованные кандидаты {id,title,artist,year,visualId}.
-      const searchRijks = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+      const searchRijks = async (query: string, suggestion: LLMPaintingSuggestion, relaxed = false): Promise<FoundPainting | null> => {
         try {
           const res = await fetch(`/api/rijks/search?q=${encodeURIComponent(query)}`);
           if (!res.ok) return null;
@@ -547,7 +548,7 @@ ${historyBlock}
             if (!a.title || !a.visualId) continue;
 
             // Требуем совпадение НАЗВАНИЯ (сюжет), а не только автора.
-            const matchesTitle = titlesMatch(suggestion.title, a.title);
+            const matchesTitle = titlesMatch(suggestion.title, a.title, relaxed);
 
             if (matchesTitle) {
               const imageUrl = `/api/rijks/image?visual=${encodeURIComponent(a.visualId)}`;
@@ -571,7 +572,7 @@ ${historyBlock}
       };
 
       // Helper: search Victoria and Albert Museum (V&A) — открытый API, без ключа.
-      const searchVA = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+      const searchVA = async (query: string, suggestion: LLMPaintingSuggestion, relaxed = false): Promise<FoundPainting | null> => {
         try {
           const res = await fetch(`/api/va/search?q=${encodeURIComponent(query)}`);
           if (!res.ok) return null;
@@ -579,7 +580,7 @@ ${historyBlock}
 
           for (const a of results) {
             if (!a.title || !a.image) continue;
-            if (!titlesMatch(suggestion.title, a.title)) continue;
+            if (!titlesMatch(suggestion.title, a.title, relaxed)) continue;
 
             const imageUrl = `/api/va/image?url=${encodeURIComponent(a.image)}`;
             if (!(await checkImage(imageUrl))) continue;
@@ -634,13 +635,13 @@ ${historyBlock}
 
       // Поиск ОДНОЙ картины под предложение: каталог -> Met -> Chicago -> Cleveland
       // -> Rijks -> V&A -> Wikimedia. Без дедупликации (её делает вызывающий код).
-      const findOnePainting = async (suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+      const findOnePainting = async (suggestion: LLMPaintingSuggestion, relaxed = false): Promise<FoundPainting | null> => {
         let found: FoundPainting | null = null;
         const queries = [suggestion.title, suggestion.search_query, `${suggestion.artist} ${suggestion.title}`];
 
         // 0. Локальный каталог (быстро, наличие уже известно)
         try {
-          const catRes = await fetch(`/api/catalog/search?title=${encodeURIComponent(suggestion.title)}&artist=${encodeURIComponent(suggestion.artist)}`);
+          const catRes = await fetch(`/api/catalog/search?title=${encodeURIComponent(suggestion.title)}&artist=${encodeURIComponent(suggestion.artist)}${relaxed ? '&relaxed=1' : ''}`);
           if (catRes.ok) {
             const hit = ((await catRes.json()).data || [])[0];
             if (hit) {
@@ -661,7 +662,7 @@ ${historyBlock}
 
         // 1. Met
         if (!found) {
-          for (const query of queries) { found = await searchMet(query, suggestion); if (found) break; }
+          for (const query of queries) { found = await searchMet(query, suggestion, relaxed); if (found) break; }
         }
 
         // 2. Art Institute of Chicago
@@ -675,7 +676,7 @@ ${historyBlock}
               const results = ((await res.json()).data || []) as MuseumArtwork[];
               for (const a of results) {
                 if (!a.image_id) continue;
-                if (titlesMatch(suggestion.title, a.title)) {
+                if (titlesMatch(suggestion.title, a.title, relaxed)) {
                   const imageUrl = `/api/museum/image/${a.image_id}`;
                   if (await checkImage(imageUrl)) { matchedArt = a; break; }
                 }
@@ -707,17 +708,17 @@ ${historyBlock}
 
         // 3. Cleveland
         if (!found) {
-          for (const query of queries) { found = await searchCleveland(query, suggestion); if (found) break; }
+          for (const query of queries) { found = await searchCleveland(query, suggestion, relaxed); if (found) break; }
         }
 
         // 4. Rijksmuseum
         if (!found) {
-          for (const query of queries) { found = await searchRijks(query, suggestion); if (found) break; }
+          for (const query of queries) { found = await searchRijks(query, suggestion, relaxed); if (found) break; }
         }
 
         // 5. Victoria and Albert
         if (!found) {
-          for (const query of queries) { found = await searchVA(query, suggestion); if (found) break; }
+          for (const query of queries) { found = await searchVA(query, suggestion, relaxed); if (found) break; }
         }
 
         // 6. Wikimedia Commons (любая известная работа)
@@ -736,7 +737,7 @@ ${historyBlock}
       const BATCH = 4;
       for (let i = 0; i < suggestions.length && foundPaintings.length < 3; i += BATCH) {
         const batch = suggestions.slice(i, i + BATCH);
-        const results = await Promise.all(batch.map(s => findOnePainting(s)));
+        const results = await Promise.all(batch.map(s => findOnePainting(s, isAppend)));
         for (const found of results) {
           if (foundPaintings.length >= 3) break;
           if (!found) continue;
@@ -806,6 +807,7 @@ ${paintingsInfo}
 - Опирайся ТОЛЬКО на приведённые фактические данные (название, автор, год, материалы, "Данные музея о картине").
 - СТРОГО ЗАПРЕЩЕНО придумывать сюжет, действие, цвета, число и поведение персонажей, детали пейзажа, которых нет в данных. Например, нельзя превращать теги "Lions, Forests" в "лев мирно пьёт из реки в окружении зверей".
 - Если указано "Данные музея о сюжете ОТСУТСТВУЮТ" — НЕ описывай, что изображено, и не строй догадок. Вместо этого расскажи об авторе, технике, стиле и эпохе в достоверных терминах.
+- НИКОГДА не пиши мета-комментарии о нехватке информации (запрещены фразы вроде "эта информация не даёт подробного описания", "нет данных о содержании", "позволяет понять контекст, но не само содержание"). Просто пиши то, что известно — без оговорок об отсутствии данных.
 - Лучше короче, но правда, чем красиво и неверно.
 
 1. "why_fits" — 1-2 предложения: как тема/атмосфера картины перекликается с эмоцией пользователя. Без воды.

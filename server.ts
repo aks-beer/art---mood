@@ -12,14 +12,14 @@ const catNorm = (s: string): string =>
 
 const CAT_STOP = new Set(["the","a","an","of","in","at","on","and","with","for","to","by","de","la","le","les","du","des","el","los","las"]);
 
-const catTitleMatch = (q: string, t: string): boolean => {
+const catTitleMatch = (q: string, t: string, threshold = 0.6): boolean => {
   if (!q || !t) return false;
   if (q === t) return true;
   if (t.includes(q) || q.includes(t)) return true;
   const qw = q.split(" ").filter((w) => w.length > 1 && !CAT_STOP.has(w));
   if (!qw.length) return false;
   const matched = qw.filter((w) => t.includes(w));
-  return matched.length / qw.length >= 0.6;
+  return matched.length / qw.length >= threshold;
 };
 
 interface CatalogItem { source: string; id: number; title: string; artist: string; year: string; image: string; _t?: string; _a?: string; }
@@ -203,15 +203,19 @@ async function startServer() {
   app.get("/api/catalog/search", (req, res) => {
     const title = catNorm((req.query.title as string) || "");
     const artist = catNorm((req.query.artist as string) || "");
+    // relaxed (для "Подобрать ещё"): ниже порог по названию и автор не обязателен.
+    const relaxed = req.query.relaxed === "1";
     if (!title || CATALOG.length === 0) { res.json({ data: [] }); return; }
 
+    const threshold = relaxed ? 0.4 : 0.6;
     const artistTokens = artist.split(" ").filter((w) => w.length >= 4);
     const matches: { r: CatalogItem; score: number }[] = [];
     for (const r of CATALOG) {
-      if (!catTitleMatch(title, r._t || "")) continue;
+      if (!catTitleMatch(title, r._t || "", threshold)) continue;
       const artistOk = artistTokens.length === 0 || artistTokens.some((w) => (r._a || "").includes(w));
-      // Если автор задан, но не совпал — пропускаем (одноимённая работа другого автора).
-      if (artistTokens.length > 0 && !artistOk) continue;
+      // В обычном режиме при заданном авторе требуем совпадение автора (чтобы не
+      // выдать одноимённую работу другого художника). В relaxed — не требуем.
+      if (!relaxed && artistTokens.length > 0 && !artistOk) continue;
       const score = (r._t === title ? 2 : 0) + (artistOk ? 1 : 0);
       matches.push({ r, score });
     }
@@ -598,12 +602,15 @@ async function startServer() {
     try {
       const { q } = req.query;
       if (!q) { res.status(400).json({ error: "Query parameter 'q' is required" }); return; }
-      const url = `https://api.vam.ac.uk/v2/objects/search?q=${encodeURIComponent(q as string)}&images_exist=true&page_size=8` +
-        `&q_object_type=painting`;
+      // q_object_type в API не фильтрует надёжно (возвращает ноты/постеры/ткани),
+      // поэтому фильтруем по objectType на нашей стороне.
+      const url = `https://api.vam.ac.uk/v2/objects/search?q=${encodeURIComponent(q as string)}&images_exist=true&page_size=15`;
       const response = await fetch(url, { headers: { "User-Agent": MUSEUM_UA } });
       if (!response.ok) { res.status(response.status).json({ error: `V&A API ${response.statusText}` }); return; }
       const j = await response.json();
+      const isPainting = (t: string) => /painting|watercolou?r|tempera|gouache/i.test(t || "");
       const data = (j.records || [])
+        .filter((r: any) => isPainting(r.objectType))
         .map((r: any) => {
           const imgId = r._primaryImageId;
           return {
