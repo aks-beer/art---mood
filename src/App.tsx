@@ -376,6 +376,7 @@ ${historyBlock}
         museumDescription: string;
         medium: string;
         source: 'chicago' | 'met' | 'cleveland' | 'rijks';
+        wikidataUrl?: string; // точная ссылка Met на картину в Wikidata (для заземления через Wikipedia)
       }
 
       // Helper to check if image actually loads
@@ -436,7 +437,8 @@ ${historyBlock}
                 imageUrl,
                 museumDescription: metDesc,
                 medium: obj.medium || '',
-                source: 'met' as const
+                source: 'met' as const,
+                wikidataUrl: obj.objectWikidata_URL || undefined
               };
             }
           }
@@ -630,6 +632,29 @@ ${historyBlock}
       if (foundPaintings.length === 0) {
         throw new Error("Не удалось найти предложенные картины в коллекции музея. Попробуйте другое настроение.");
       }
+
+      // ==========================================
+      // ОБОГАЩЕНИЕ: достоверное описание из Wikipedia/Wikidata для картин со
+      // слабыми музейными данными (прежде всего Met — у него только теги).
+      // Met передаёт точную ссылку wikidataUrl, остальные — поиск с верификацией.
+      // ==========================================
+      setLoadingStep("Шаг 2: Уточняем факты по энциклопедии...");
+      await Promise.all(foundPaintings.map(async (p) => {
+        // Картины с длинной музейной прозой (Chicago/Cleveland/Rijks) не трогаем.
+        if (p.museumDescription && p.museumDescription.length >= 120) return;
+        try {
+          const params = new URLSearchParams({ title: p.title, artist: p.author });
+          if (p.wikidataUrl) params.set('wikidata', p.wikidataUrl);
+          const r = await fetch(`/api/wiki/describe?${params.toString()}`);
+          if (!r.ok) return;
+          const d = await r.json();
+          if (d.extract) {
+            p.museumDescription = p.museumDescription
+              ? `${p.museumDescription} ${d.extract}`
+              : d.extract;
+          }
+        } catch { /* мягко игнорируем — описание не критично */ }
+      }));
 
       // ==========================================
       // ЭТАП 3: LLM ГЕНЕРИРУЕТ ОПИСАНИЯ СТРОГО НА ОСНОВЕ РЕАЛЬНЫХ ДАННЫХ МУЗЕЯ

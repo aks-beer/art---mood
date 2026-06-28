@@ -79,6 +79,63 @@ const rijksDescription = (obj: any): string => {
   return (en || any)?.content || "";
 };
 
+// ===========================================================================
+// Wikipedia / Wikidata — источник достоверных описаний для картин без музейной
+// прозы (прежде всего Met). Met даёт точную ссылку objectWikidata_URL на
+// КОНКРЕТНУЮ картину, поэтому путь через Wikidata не может перепутать работу.
+// Для остальных — поиск по Wikipedia со строгой проверкой имени автора.
+// ===========================================================================
+const wikiFetchJson = async (url: string): Promise<any | null> => {
+  try {
+    const r = await fetch(url, { headers: { "User-Agent": MUSEUM_UA, "Accept": "application/json" } });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+};
+
+const wikiExtractByTitle = async (title: string): Promise<string> => {
+  const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&format=json&redirects=1&titles=${encodeURIComponent(title)}`;
+  const j = await wikiFetchJson(url);
+  const pages = j?.query?.pages;
+  if (!pages) return "";
+  const p: any = Object.values(pages)[0];
+  if (!p || p.missing !== undefined) return "";
+  return (p.extract || "").trim();
+};
+
+const wikiTitleFromWikidata = async (qid: string): Promise<string | null> => {
+  const url = `https://www.wikidata.org/w/api.php?action=wbgetentities&ids=${qid}&props=sitelinks&format=json`;
+  const j = await wikiFetchJson(url);
+  return j?.entities?.[qid]?.sitelinks?.enwiki?.title || null;
+};
+
+// Имя автора встречается в тексте? (защита от неверной страницы при поиске)
+const ARTIST_STOPWORDS = new Set([
+  "attributed", "after", "studio", "circle", "follower", "workshop", "manner",
+  "copy", "style", "school", "possibly", "probably", "painter", "le", "douanier"
+]);
+const wikiVerifyArtist = (text: string, artist: string): boolean => {
+  const lc = text.toLowerCase();
+  const tokens = (artist.toLowerCase().match(/[a-zà-ÿ]{4,}/g) || []).filter((t) => !ARTIST_STOPWORDS.has(t));
+  if (tokens.length === 0) return false;
+  return tokens.some((t) => lc.includes(t));
+};
+
+// Значимое слово из названия встречается? (если значимых нет, напр. "Self-Portrait", не блокируем)
+const TITLE_STOPWORDS = new Set([
+  "the", "with", "and", "portrait", "painting", "study", "self", "untitled", "young", "woman", "man"
+]);
+const wikiVerifyTitle = (text: string, title: string): boolean => {
+  const lc = text.toLowerCase();
+  const tokens = (title.toLowerCase().match(/[a-zà-ÿ]{4,}/g) || []).filter((t) => !TITLE_STOPWORDS.has(t));
+  if (tokens.length === 0) return true;
+  return tokens.some((t) => lc.includes(t));
+};
+
+// Страница про ПРОИЗВЕДЕНИЕ, а не биографию автора? (биографии пишут "was a painter")
+const wikiLooksLikeArtwork = (extract: string): boolean =>
+  /\b(painting|oil on canvas|oil on panel|oil on|tempera|watercolou?r|gouache|fresco|canvas|panel|depicts|artwork|altarpiece|triptych|etching|drawing)\b/i.test(extract);
+
 const rijksIdToNum = (uri: string): number => {
   const m = (uri || "").match(/(\d+)\s*$/);
   return m ? parseInt(m[1], 10) : Math.floor(Math.random() * 1e9);
@@ -388,6 +445,53 @@ async function startServer() {
     } catch (error) {
       console.error("Error proxying Rijksmuseum image:", error);
       res.status(500).end();
+    }
+  });
+
+  // API Route: Wikipedia/Wikidata description — достоверное заземление для картин
+  // без музейной прозы. Возвращает { extract, source } или { extract: "" }.
+  app.get("/api/wiki/describe", async (req, res) => {
+    try {
+      const title = (req.query.title as string) || "";
+      const artist = (req.query.artist as string) || "";
+      const wikidata = (req.query.wikidata as string) || "";
+
+      // 1) Точный путь: Q-id из ссылки музея (Met objectWikidata_URL).
+      const qidMatch = wikidata.match(/Q\d+/);
+      if (qidMatch) {
+        const enTitle = await wikiTitleFromWikidata(qidMatch[0]);
+        if (enTitle) {
+          const extract = await wikiExtractByTitle(enTitle);
+          if (extract.length >= 40) {
+            res.json({ extract: extract.slice(0, 1200), source: "wikidata", title: enTitle });
+            return;
+          }
+        }
+      }
+
+      // 2) Поиск по Wikipedia + строгая проверка имени автора.
+      if (title) {
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&srlimit=1&srsearch=${encodeURIComponent(`${title} ${artist} painting`)}`;
+        const sj = await wikiFetchJson(searchUrl);
+        const hit = sj?.query?.search?.[0]?.title;
+        if (hit) {
+          const extract = await wikiExtractByTitle(hit);
+          // Тройная защита: имя автора + слово из названия + это страница о произведении.
+          const ok = extract.length >= 40
+            && wikiVerifyArtist(extract, artist)
+            && wikiVerifyTitle(`${hit} ${extract}`, title)
+            && wikiLooksLikeArtwork(extract);
+          if (ok) {
+            res.json({ extract: extract.slice(0, 1200), source: "search", title: hit });
+            return;
+          }
+        }
+      }
+
+      res.json({ extract: "" });
+    } catch (error: any) {
+      console.error("Error in wiki describe:", error);
+      res.json({ extract: "" });
     }
   });
 
