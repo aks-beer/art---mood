@@ -56,6 +56,29 @@ const rijksYear = (obj: any): string | null => {
   return n ? n.content : null;
 };
 
+// Рекурсивно собирает прозу (LinguisticObject.content), игнорируя заголовки (Name).
+const rijksCollectContents = (node: any, out: any[]): void => {
+  if (!node || typeof node !== "object") return;
+  if (Array.isArray(node)) { node.forEach((n) => rijksCollectContents(n, out)); return; }
+  if (node.type === "LinguisticObject" && typeof node.content === "string" && node.content.length > 0) {
+    const langs = langOf(node);
+    out.push({ content: node.content, en: langs.includes(AAT_EN), len: node.content.length });
+  }
+  for (const k of Object.keys(node)) {
+    if (k === "content" || k === "language") continue;
+    rijksCollectContents(node[k], out);
+  }
+};
+
+const rijksDescription = (obj: any): string => {
+  const out: any[] = [];
+  rijksCollectContents(obj.subject_of, out);
+  const long = out.filter((x) => x.len >= 60);
+  const en = long.filter((x) => x.en).sort((a, b) => b.len - a.len)[0];
+  const any = long.sort((a, b) => b.len - a.len)[0];
+  return (en || any)?.content || "";
+};
+
 const rijksIdToNum = (uri: string): number => {
   const m = (uri || "").match(/(\d+)\s*$/);
   return m ? parseInt(m[1], 10) : Math.floor(Math.random() * 1e9);
@@ -305,6 +328,7 @@ async function startServer() {
           title: rijksTitle(o),
           artist: rijksArtist(o),
           year: rijksYear(o),
+          description: rijksDescription(o),
           visualId: (o.shows || [])[0]?.id || null
         }))
         .filter((x: any) => x.title && x.visualId);
