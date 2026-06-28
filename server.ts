@@ -1,6 +1,40 @@
 import express from "express";
 import path from "path";
+import { readFileSync, existsSync } from "fs";
 import { createServer as createViteServer } from "vite";
+
+// ===========================================================================
+// Локальный каталог картин (data/catalog.json, собирается scripts/build-catalog.mjs).
+// Позволяет матчить предложения куратора локально, не проверяя наличие в рантайме.
+// ===========================================================================
+const catNorm = (s: string): string =>
+  (s || "").toLowerCase().replace(/[^a-zà-ÿ0-9\s]/gi, " ").replace(/\s+/g, " ").trim();
+
+const CAT_STOP = new Set(["the","a","an","of","in","at","on","and","with","for","to","by","de","la","le","les","du","des","el","los","las"]);
+
+const catTitleMatch = (q: string, t: string): boolean => {
+  if (!q || !t) return false;
+  if (q === t) return true;
+  if (t.includes(q) || q.includes(t)) return true;
+  const qw = q.split(" ").filter((w) => w.length > 1 && !CAT_STOP.has(w));
+  if (!qw.length) return false;
+  const matched = qw.filter((w) => t.includes(w));
+  return matched.length / qw.length >= 0.6;
+};
+
+interface CatalogItem { source: string; id: number; title: string; artist: string; year: string; image: string; _t?: string; _a?: string; }
+let CATALOG: CatalogItem[] = [];
+const loadCatalog = () => {
+  try {
+    const p = path.join(process.cwd(), "data", "catalog.json");
+    if (!existsSync(p)) { console.log("Каталог data/catalog.json не найден — работаем только рантайм-поиском."); return; }
+    const j = JSON.parse(readFileSync(p, "utf8"));
+    CATALOG = (j.items || []).map((r: CatalogItem) => ({ ...r, _t: catNorm(r.title), _a: catNorm(r.artist) }));
+    console.log(`Каталог загружен: ${CATALOG.length} картин`, j.bySource || {});
+  } catch (e) {
+    console.error("Не удалось загрузить каталог:", e);
+  }
+};
 
 // ===========================================================================
 // Rijksmuseum (Amsterdam) — новая Linked Open Data платформа (без API-ключа).
@@ -146,6 +180,32 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json());
+
+  loadCatalog();
+
+  // API Route: локальный поиск по каталогу. Требует совпадения НАЗВАНИЯ и (если
+  // автор задан) АВТОРА — чтобы не выдать одноимённую работу другого художника.
+  app.get("/api/catalog/search", (req, res) => {
+    const title = catNorm((req.query.title as string) || "");
+    const artist = catNorm((req.query.artist as string) || "");
+    if (!title || CATALOG.length === 0) { res.json({ data: [] }); return; }
+
+    const artistTokens = artist.split(" ").filter((w) => w.length >= 4);
+    const matches: { r: CatalogItem; score: number }[] = [];
+    for (const r of CATALOG) {
+      if (!catTitleMatch(title, r._t || "")) continue;
+      const artistOk = artistTokens.length === 0 || artistTokens.some((w) => (r._a || "").includes(w));
+      // Если автор задан, но не совпал — пропускаем (одноимённая работа другого автора).
+      if (artistTokens.length > 0 && !artistOk) continue;
+      const score = (r._t === title ? 2 : 0) + (artistOk ? 1 : 0);
+      matches.push({ r, score });
+    }
+    matches.sort((a, b) => b.score - a.score);
+    const data = matches.slice(0, 3).map((m) => ({
+      source: m.r.source, id: m.r.id, title: m.r.title, artist: m.r.artist, year: m.r.year, image: m.r.image,
+    }));
+    res.json({ data });
+  });
 
   // API Route: Proxy search requests to avoid potential CORS and sandboxing issues
   app.get("/api/museum/search", async (req, res) => {

@@ -542,12 +542,40 @@ ${historyBlock}
 
         let found: FoundPainting | null = null;
 
-        // === TRY MET MUSEUM FIRST ===
         const queries = [suggestion.title, suggestion.search_query, `${suggestion.artist} ${suggestion.title}`];
-        
-        for (const query of queries) {
-          found = await searchMet(query, suggestion);
-          if (found) break;
+
+        // === 0. ЛОКАЛЬНЫЙ КАТАЛОГ (быстро, наличие уже известно) ===
+        try {
+          const catRes = await fetch(`/api/catalog/search?title=${encodeURIComponent(suggestion.title)}&artist=${encodeURIComponent(suggestion.artist)}`);
+          if (catRes.ok) {
+            const hit = ((await catRes.json()).data || [])[0];
+            if (hit) {
+              let imageUrl = '';
+              if (hit.source === 'chicago') imageUrl = `/api/museum/image/${hit.image}`;
+              else if (hit.source === 'cleveland') imageUrl = `/api/cma/image?url=${encodeURIComponent(hit.image)}`;
+              else if (hit.source === 'met') imageUrl = `/api/met/image?url=${encodeURIComponent(hit.image)}`;
+              if (imageUrl) {
+                found = {
+                  id: hit.id,
+                  title: hit.title,
+                  author: hit.artist || suggestion.artist,
+                  year: hit.year || "Период неизвестен",
+                  imageUrl,
+                  museumDescription: '', // описание дозагрузим из Wikipedia на этапе обогащения
+                  medium: '',
+                  source: hit.source
+                };
+              }
+            }
+          }
+        } catch { /* каталог не критичен — упадём в живой поиск ниже */ }
+
+        // === 1. ЖИВОЙ ПОИСК: THE MET (если в каталоге не нашлось) ===
+        if (!found) {
+          for (const query of queries) {
+            found = await searchMet(query, suggestion);
+            if (found) break;
+          }
         }
 
         // === FALLBACK: TRY ART INSTITUTE OF CHICAGO ===
