@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type MouseEvent as ReactMouseEvent } from 'react';
 import { 
   Sparkles, 
   Palette, 
@@ -12,6 +12,7 @@ import {
   X, 
   Bookmark, 
   Maximize2,
+  ZoomIn,
   Zap,
   RotateCcw,
   Settings
@@ -20,9 +21,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { MuseumArtwork, ArtCardData, LLMPaintingSuggestion, PaintingHistoryEntry, ProviderStatus } from './types';
 import TestPage from './TestPage';
 
-const ALL_ART_EMOJIS = [
-  // Эмоции и состояния
-  "😊", "😢", "❤️", "💔", "😱", "🤔", "😌", "🤩", "😠", "😭", 
+// Эмодзи-ЛИЦА/ЭМОЦИИ — передают настроение человека (ищем атмосферу картины).
+const FACE_EMOJIS = ["😊", "😢", "❤️", "💔", "😱", "🤔", "😌", "🤩", "😠", "😭"];
+
+// Остальные эмодзи — это КОНКРЕТНЫЕ предметы/явления, которые должны быть
+// изображены на картине (ищем именно вещь: 🌌 -> звёздное небо, 🌊 -> море).
+const OBJECT_EMOJIS = [
   // Природа и стихии (пейзажи, марины)
   "🌊", "☁️", "🍂", "🔥", "⚡", "🌪️", "❄️", "🌞", "🌙", "🌌", "🏔️", "🌿",
   // Жизнь, смерть и символизм (натюрморты, memento mori)
@@ -30,6 +34,9 @@ const ALL_ART_EMOJIS = [
   // Общество, история, драма
   "🎭", "⚔️", "🏰", "👑", "🎻", "🎨", "🚢", "🎪", "⛪"
 ];
+
+const FACE_EMOJI_SET = new Set(FACE_EMOJIS);
+const ALL_ART_EMOJIS = [...FACE_EMOJIS, ...OBJECT_EMOJIS];
 
 const MAX_MEMORY = 100;
 
@@ -69,6 +76,28 @@ export default function App() {
   // UI Interaction States
   const [activeModalArt, setActiveModalArt] = useState<ArtCardData | null>(null);
   const [failedImageIds, setFailedImageIds] = useState<Set<number>>(new Set());
+
+  // Zoom-on-click для изображения в модалке
+  const [isZoomed, setIsZoomed] = useState<boolean>(false);
+  const [zoomOrigin, setZoomOrigin] = useState<string>('center center');
+
+  const openArt = (art: ArtCardData) => {
+    setIsZoomed(false);
+    setZoomOrigin('center center');
+    setActiveModalArt(art);
+  };
+  const closeArt = () => {
+    setIsZoomed(false);
+    setActiveModalArt(null);
+  };
+  // При зуме transform-origin следует за курсором, чтобы рассмотреть нужный участок.
+  const handleZoomMove = (e: ReactMouseEvent<HTMLImageElement>) => {
+    if (!isZoomed) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    setZoomOrigin(`${x}% ${y}%`);
+  };
 
   // Load configuration and history on mount
   useEffect(() => {
@@ -309,30 +338,37 @@ export default function App() {
           .join('\n');
       }
 
+      // Классификация выбранных эмодзи: лица -> эмоция (настроение), остальные -> объекты (предмет на картине)
+      const emotionEmojis = selectedEmojis.filter(e => FACE_EMOJI_SET.has(e));
+      const objectEmojis = selectedEmojis.filter(e => !FACE_EMOJI_SET.has(e));
+      const inputBreakdown = [
+        emotionEmojis.length ? `ЭМОДЗИ-ЭМОЦИИ (передают НАСТРОЕНИЕ человека): ${emotionEmojis.join(' ')}` : '',
+        objectEmojis.length ? `ЭМОДЗИ-ОБЪЕКТЫ (это КОНКРЕТНЫЕ предметы/явления, которые ДОЛЖНЫ БЫТЬ ИЗОБРАЖЕНЫ на картине): ${objectEmojis.join(' ')}` : '',
+        moodInput ? `ТЕКСТ пользователя: "${moodInput}"` : ''
+      ].filter(Boolean).join('\n');
+
       const suggestPrompt = `Ты — арт-куратор. Работай строго в ДВА шага и верни только JSON.
 
-Вход пользователя (эмодзи и/или текст): "${currentUserState}".
+ВХОД ПОЛЬЗОВАТЕЛЯ:
+${inputBreakdown}
 
-ШАГ 1 — РАЗБОР НАСТРОЕНИЯ.
-Для КАЖДОГО эмодзи и для текста выпиши 4-6 существительных-образов и настроение, которые он передаёт. Думай как ассоциации.
-Примеры (по аналогии действуй для ЛЮБЫХ эмодзи, даже которых нет в списке):
-- 💀 -> смерть, череп, могила, погребение, отчаяние, memento mori, тлен
-- 🦋 -> бабочка, перерождение, лёгкость, природа, цветы, недолговечность, весна
-- 🌌 -> космос, звёзды, ночное небо, луна, бесконечность, мечта
-- 🌊 -> море, волны, шторм, корабль, стихия, мощь
-- ❤️ -> любовь, нежность, страсть, объятия, близость
-- 😢 -> грусть, слёзы, дождь, одиночество, утрата, сумерки
-- 🔥 -> огонь, пожар, гнев, разрушение, страсть
-- 👑 -> власть, король, роскошь, корона, величие
-- 🎭 -> театр, маска, драма, притворство, карнавал
-- 🐎 -> лошадь, скачка, движение, охота, свобода
+ШАГ 1 — РАЗБОР ВХОДА. Преобразуй вход в образы для поиска картин по ДВУМ РАЗНЫМ правилам:
+A) ЭМОДЗИ-ЭМОЦИИ и ТЕКСТ про чувства -> определи НАСТРОЕНИЕ и подходящие ему сюжеты/атмосферу.
+   Примеры: 😊 -> радость, свет, праздник, танец; 😢 -> грусть, дождь, одиночество, сумерки;
+   ❤️ -> любовь, объятия, нежность; 😱 -> страх, кошмар, мрак; 😌 -> покой, тишина, сад.
+B) ЭМОДЗИ-ОБЪЕКТЫ -> НЕ ищи настроение. Возьми СУЩЕСТВИТЕЛЬНЫЕ-предметы, которые этот эмодзи
+   обозначает, и ищи картины, где это БУКВАЛЬНО нарисовано.
+   Примеры: 🌌 -> звёздное ночное небо, космос (например Vincent van Gogh "The Starry Night");
+   🌊 -> море, волны, шторм; 🌙 -> луна, ночь; 💀 -> череп, кости, vanitas; 🦋 -> бабочка, цветы;
+   🔥 -> огонь, пожар; 👑 -> король, корона, трон; 🚢 -> корабль, море; ⚔️ -> битва, воины;
+   🐎 -> лошадь; 🌹 -> розы, цветы; 🕊️ -> голубь, птица; 🏔️ -> горы; 🍷 -> вино, застолье.
+Выпиши получившиеся образы/существительные.
 
-ШАГ 2 — ПОДБОР КАРТИН.
-Опираясь ТОЛЬКО на образы и настроение из ШАГА 1, подбери 12 РЕАЛЬНЫХ картин, на которых эти образы БУКВАЛЬНО изображены.
+ШАГ 2 — ПОДБОР КАРТИН. Подбери 12 РЕАЛЬНЫХ картин, где образы из ШАГА 1 БУКВАЛЬНО изображены.
 ПРАВИЛА:
 1. Точное английское название + автор. Каждая картина — от РАЗНОГО автора.
-2. ГЛАВНОЕ: сюжет картины должен явно показывать образ из ШАГА 1. Для 💀 на картине должен быть череп/смерть/могила; для 🦋 — бабочка/цветы/природа. НЕ предлагай картину лишь потому, что она знаменита: если её сюжет не про это настроение — выбрось.
-3. Среди ПОДХОДЯЩИХ по теме сначала ставь более известные работы.
+2. ГЛАВНОЕ: для ЭМОДЗИ-ОБЪЕКТОВ нужный предмет должен реально присутствовать на холсте (🌌 -> на картине звёздное небо, 🌊 -> море). Для ЭМОДЗИ-ЭМОЦИЙ — атмосфера/сюжет должны передавать это настроение. Если связь натянута — выбрось, даже если работа знаменита.
+3. Среди подходящих по теме сначала ставь более известные работы.
 4. Предпочитай коллекции The Met, Art Institute of Chicago, Cleveland Museum of Art, Rijksmuseum — по ним идёт поиск.
 5. Только название, автор и поисковый запрос. Без описаний.
 
@@ -1098,7 +1134,7 @@ ${paintingsInfo}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5, delay: index * 0.1 }}
                 whileHover={{ y: -8 }}
-                onClick={() => setActiveModalArt(art)}
+                onClick={() => openArt(art)}
                 className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden cursor-pointer group shadow-xl hover:shadow-2xl hover:border-zinc-700/60 transition-all duration-300 flex flex-col h-full"
               >
                 {/* Image Frame */}
@@ -1188,7 +1224,7 @@ ${paintingsInfo}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.3 }}
-            onClick={() => setActiveModalArt(null)}
+            onClick={closeArt}
             className="fixed inset-0 z-50 flex items-center justify-center p-4 md:p-8 bg-zinc-950/95 backdrop-blur-md"
           >
             <motion.div 
@@ -1201,27 +1237,42 @@ ${paintingsInfo}
             >
               {/* Close Button */}
               <button 
-                onClick={() => setActiveModalArt(null)}
+                onClick={closeArt}
                 className="absolute top-4 right-4 lg:top-6 lg:right-6 z-20 w-11 h-11 bg-zinc-950/80 hover:bg-zinc-950 border border-zinc-800 text-white rounded-full flex items-center justify-center transition-all backdrop-blur-md cursor-pointer shadow-lg"
               >
                 <X className="w-5 h-5" />
               </button>
 
               {/* Left Column: Massive High-Fidelity Painting */}
-              <div className="w-full lg:w-1/2 xl:w-3/5 bg-zinc-950 flex items-center justify-center p-4 lg:p-8 min-h-[35vh] lg:min-h-[75vh] relative border-b lg:border-b-0 lg:border-r border-zinc-850">
+              <div className="w-full lg:w-1/2 xl:w-3/5 bg-zinc-950 flex items-center justify-center p-4 lg:p-8 min-h-[35vh] lg:min-h-[75vh] relative border-b lg:border-b-0 lg:border-r border-zinc-850 overflow-hidden">
                 {failedImageIds.has(activeModalArt.id) ? (
                   <div className="flex flex-col items-center justify-center p-12 text-center text-zinc-500">
                     <Palette className="w-16 h-16 text-zinc-800 mb-4 animate-pulse" />
                     <p className="text-sm font-light max-w-xs">
-                      Сервер Чикагского института искусств ограничил прямой просмотр этого изображения через сторонние платформы.
+                      Сервер музея ограничил прямой просмотр этого изображения через сторонние платформы.
                     </p>
                   </div>
                 ) : (
-                  <img 
-                    src={activeModalArt.image} 
-                    alt={activeModalArt.title} 
-                    className="max-w-full max-h-[70vh] object-contain rounded-xl shadow-[0_0_35px_rgba(0,0,0,0.6)]"
-                  />
+                  <>
+                    <img
+                      src={activeModalArt.image}
+                      alt={activeModalArt.title}
+                      onClick={() => setIsZoomed(z => !z)}
+                      onMouseMove={handleZoomMove}
+                      onMouseLeave={() => setIsZoomed(false)}
+                      style={{
+                        transform: isZoomed ? 'scale(2.5)' : 'scale(1)',
+                        transformOrigin: zoomOrigin,
+                        cursor: isZoomed ? 'zoom-out' : 'zoom-in'
+                      }}
+                      className="max-w-full max-h-[70vh] object-contain rounded-xl shadow-[0_0_35px_rgba(0,0,0,0.6)] transition-transform duration-200 select-none"
+                    />
+                    {/* Подсказка про зум */}
+                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-1.5 bg-zinc-950/80 border border-zinc-800 text-zinc-300 text-xs px-3 py-1.5 rounded-full backdrop-blur-md pointer-events-none">
+                      <ZoomIn className="w-3.5 h-3.5 text-yellow-400" />
+                      {isZoomed ? 'Двигайте мышью • клик — отдалить' : 'Клик по картине — увеличить'}
+                    </div>
+                  </>
                 )}
               </div>
 
