@@ -127,14 +127,29 @@ const wikiFetchJson = async (url: string): Promise<any | null> => {
   } catch { return null; }
 };
 
-const wikiExtractByTitle = async (title: string): Promise<string> => {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&format=json&redirects=1&titles=${encodeURIComponent(title)}`;
-  const j = await wikiFetchJson(url);
-  const pages = j?.query?.pages;
-  if (!pages) return "";
-  const p: any = Object.values(pages)[0];
-  if (!p || p.missing !== undefined) return "";
-  return (p.extract || "").trim();
+// Имя файла Commons из URL превью/оригинала.
+const wikiCommonsFilename = (url: string): string => {
+  const thumb = url.match(/\/commons\/thumb\/[^/]+\/[^/]+\/([^/]+)\//);
+  if (thumb) return thumb[1];
+  const orig = url.match(/\/commons\/[^/]+\/[^/]+\/([^/?]+)$/);
+  return orig ? orig[1] : "";
+};
+
+// REST summary за один запрос отдаёт и вводный текст, и картинку (Wikimedia Commons).
+const wikiSummary = async (title: string): Promise<{ extract: string; image: string }> => {
+  const j = await wikiFetchJson(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+  if (!j || j.type === "disambiguation") return { extract: "", image: "" };
+  const raw = j.thumbnail?.source || j.originalimage?.source || "";
+  // Прямые thumb-URL фиксированной ширины ненадёжны (для гигапиксельных оригиналов
+  // Wikimedia рендерит лишь часть размеров). Special:FilePath?width= работает всегда.
+  let image = "";
+  if (raw) {
+    const fname = wikiCommonsFilename(raw);
+    image = fname
+      ? `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(fname)}?width=1024`
+      : raw;
+  }
+  return { extract: (j.extract || "").trim(), image };
 };
 
 const wikiTitleFromWikidata = async (qid: string): Promise<string | null> => {
@@ -508,8 +523,9 @@ async function startServer() {
     }
   });
 
-  // API Route: Wikipedia/Wikidata description — достоверное заземление для картин
-  // без музейной прозы. Возвращает { extract, source } или { extract: "" }.
+  // API Route: Wikipedia/Wikidata — достоверное описание И картинка (Wikimedia
+  // Commons). Покрывает любую известную работу, даже не из наших музеев.
+  // Возвращает { extract, image, source } или { extract: "", image: "" }.
   app.get("/api/wiki/describe", async (req, res) => {
     try {
       const title = (req.query.title as string) || "";
@@ -521,9 +537,9 @@ async function startServer() {
       if (qidMatch) {
         const enTitle = await wikiTitleFromWikidata(qidMatch[0]);
         if (enTitle) {
-          const extract = await wikiExtractByTitle(enTitle);
+          const { extract, image } = await wikiSummary(enTitle);
           if (extract.length >= 40) {
-            res.json({ extract: extract.slice(0, 1200), source: "wikidata", title: enTitle });
+            res.json({ extract: extract.slice(0, 1200), image, source: "wikidata", title: enTitle });
             return;
           }
         }
@@ -535,23 +551,106 @@ async function startServer() {
         const sj = await wikiFetchJson(searchUrl);
         const hit = sj?.query?.search?.[0]?.title;
         if (hit) {
-          const extract = await wikiExtractByTitle(hit);
+          const { extract, image } = await wikiSummary(hit);
           // Тройная защита: имя автора + слово из названия + это страница о произведении.
           const ok = extract.length >= 40
             && wikiVerifyArtist(extract, artist)
             && wikiVerifyTitle(`${hit} ${extract}`, title)
             && wikiLooksLikeArtwork(extract);
           if (ok) {
-            res.json({ extract: extract.slice(0, 1200), source: "search", title: hit });
+            res.json({ extract: extract.slice(0, 1200), image, source: "search", title: hit });
             return;
           }
         }
       }
 
-      res.json({ extract: "" });
+      res.json({ extract: "", image: "" });
     } catch (error: any) {
       console.error("Error in wiki describe:", error);
-      res.json({ extract: "" });
+      res.json({ extract: "", image: "" });
+    }
+  });
+
+  // API Route: прокси картинок Wikimedia Commons (требует User-Agent).
+  app.get("/api/wiki/image", async (req, res) => {
+    try {
+      const { url } = req.query;
+      if (!url || !/^https:\/\/(upload|commons)\.wikimedia\.org\//.test(url as string)) {
+        res.status(400).end();
+        return;
+      }
+      const response = await fetch(url as string, {
+        headers: { "User-Agent": BROWSER_UA, "Accept": "image/*,*/*;q=0.8" }
+      });
+      if (!response.ok) { res.status(response.status).end(); return; }
+      res.setHeader("Content-Type", response.headers.get("content-type") || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(Buffer.from(await response.arrayBuffer()));
+    } catch (error) {
+      console.error("Error proxying Wikimedia image:", error);
+      res.status(500).end();
+    }
+  });
+
+  // ===== Victoria and Albert Museum (V&A) — открытый API без ключа =====
+  // Поиск: возвращает нормализованных кандидатов с IIIF-картинкой.
+  app.get("/api/va/search", async (req, res) => {
+    try {
+      const { q } = req.query;
+      if (!q) { res.status(400).json({ error: "Query parameter 'q' is required" }); return; }
+      const url = `https://api.vam.ac.uk/v2/objects/search?q=${encodeURIComponent(q as string)}&images_exist=true&page_size=8` +
+        `&q_object_type=painting`;
+      const response = await fetch(url, { headers: { "User-Agent": MUSEUM_UA } });
+      if (!response.ok) { res.status(response.status).json({ error: `V&A API ${response.statusText}` }); return; }
+      const j = await response.json();
+      const data = (j.records || [])
+        .map((r: any) => {
+          const imgId = r._primaryImageId;
+          return {
+            id: r.systemNumber,
+            title: (r._primaryTitle || "").replace(/<[^>]*>/g, ""),
+            artist: r._primaryMaker?.name || "",
+            year: r._primaryDate || "",
+            image: imgId ? `https://framemark.vam.ac.uk/collections/${imgId}/full/!843,843/0/default.jpg` : "",
+          };
+        })
+        .filter((x: any) => x.title && x.image);
+      res.json({ data });
+    } catch (error: any) {
+      console.error("Error proxying search to V&A API:", error);
+      res.status(500).json({ error: error.message || "Internal server error" });
+    }
+  });
+
+  // V&A: описание конкретного объекта.
+  app.get("/api/va/detail", async (req, res) => {
+    try {
+      const { id } = req.query;
+      if (!id) { res.status(400).json({ error: "id required" }); return; }
+      const r = await fetch(`https://api.vam.ac.uk/v2/object/${encodeURIComponent(id as string)}`, { headers: { "User-Agent": MUSEUM_UA } });
+      if (!r.ok) { res.json({ description: "" }); return; }
+      const j = await r.json();
+      const rec = j.record || {};
+      const desc = (rec.summaryDescription || rec.physicalDescription || "").replace(/<[^>]*>/g, "").trim();
+      res.json({ description: desc });
+    } catch {
+      res.json({ description: "" });
+    }
+  });
+
+  // V&A: прокси картинок (IIIF framemark CDN).
+  app.get("/api/va/image", async (req, res) => {
+    try {
+      const { url } = req.query;
+      if (!url || !/^https:\/\/framemark\.vam\.ac\.uk\//.test(url as string)) { res.status(400).end(); return; }
+      const response = await fetch(url as string, { headers: { "User-Agent": BROWSER_UA, "Accept": "image/*,*/*;q=0.8" } });
+      if (!response.ok) { res.status(response.status).end(); return; }
+      res.setHeader("Content-Type", response.headers.get("content-type") || "image/jpeg");
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(Buffer.from(await response.arrayBuffer()));
+    } catch (error) {
+      console.error("Error proxying V&A image:", error);
+      res.status(500).end();
     }
   });
 

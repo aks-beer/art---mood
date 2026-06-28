@@ -418,7 +418,7 @@ ${historyBlock}
         imageUrl: string; // final image URL (proxied)
         museumDescription: string;
         medium: string;
-        source: 'chicago' | 'met' | 'cleveland' | 'rijks';
+        source: 'chicago' | 'met' | 'cleveland' | 'rijks' | 'va' | 'wiki';
         wikidataUrl?: string; // точная ссылка Met на картину в Wikidata (для заземления через Wikipedia)
       }
 
@@ -570,17 +570,75 @@ ${historyBlock}
         } catch { return null; }
       };
 
-      const foundPaintings: FoundPainting[] = [];
-      const newHistory = [...paintingHistory];
+      // Helper: search Victoria and Albert Museum (V&A) — открытый API, без ключа.
+      const searchVA = async (query: string, suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+        try {
+          const res = await fetch(`/api/va/search?q=${encodeURIComponent(query)}`);
+          if (!res.ok) return null;
+          const results = ((await res.json()).data || []) as any[];
 
-      for (const suggestion of suggestions) {
-        if (foundPaintings.length >= 3) break;
+          for (const a of results) {
+            if (!a.title || !a.image) continue;
+            if (!titlesMatch(suggestion.title, a.title)) continue;
 
+            const imageUrl = `/api/va/image?url=${encodeURIComponent(a.image)}`;
+            if (!(await checkImage(imageUrl))) continue;
+
+            let museumDescription = '';
+            try {
+              const dRes = await fetch(`/api/va/detail?id=${encodeURIComponent(a.id)}`);
+              if (dRes.ok) museumDescription = (await dRes.json()).description || '';
+            } catch { /* описание не критично */ }
+
+            return {
+              id: parseInt(String(a.id).replace(/\D/g, ''), 10) || Math.floor(Math.random() * 1e9),
+              title: a.title,
+              author: a.artist || suggestion.artist,
+              year: a.year || "Период неизвестен",
+              imageUrl,
+              museumDescription,
+              medium: '',
+              source: 'va' as const
+            };
+          }
+          return null;
+        } catch { return null; }
+      };
+
+      // Helper: Wikimedia Commons (через Wikipedia) — финальный фолбэк. Покрывает
+      // любую известную работу даже не из наших музеев (картинка + описание),
+      // с верификацией автора/названия на стороне сервера (/api/wiki/describe).
+      const searchWiki = async (suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
+        try {
+          const params = new URLSearchParams({ title: suggestion.title, artist: suggestion.artist });
+          const res = await fetch(`/api/wiki/describe?${params.toString()}`);
+          if (!res.ok) return null;
+          const d = await res.json();
+          if (!d.image || !d.extract) return null;
+
+          const imageUrl = `/api/wiki/image?url=${encodeURIComponent(d.image)}`;
+          if (!(await checkImage(imageUrl))) return null;
+
+          return {
+            id: Math.floor(Math.random() * 1e9),
+            title: d.title || suggestion.title,
+            author: suggestion.artist,
+            year: "Период неизвестен",
+            imageUrl,
+            museumDescription: d.extract,
+            medium: '',
+            source: 'wiki' as const
+          };
+        } catch { return null; }
+      };
+
+      // Поиск ОДНОЙ картины под предложение: каталог -> Met -> Chicago -> Cleveland
+      // -> Rijks -> V&A -> Wikimedia. Без дедупликации (её делает вызывающий код).
+      const findOnePainting = async (suggestion: LLMPaintingSuggestion): Promise<FoundPainting | null> => {
         let found: FoundPainting | null = null;
-
         const queries = [suggestion.title, suggestion.search_query, `${suggestion.artist} ${suggestion.title}`];
 
-        // === 0. ЛОКАЛЬНЫЙ КАТАЛОГ (быстро, наличие уже известно) ===
+        // 0. Локальный каталог (быстро, наличие уже известно)
         try {
           const catRes = await fetch(`/api/catalog/search?title=${encodeURIComponent(suggestion.title)}&artist=${encodeURIComponent(suggestion.artist)}`);
           if (catRes.ok) {
@@ -592,114 +650,103 @@ ${historyBlock}
               else if (hit.source === 'met') imageUrl = `/api/met/image?url=${encodeURIComponent(hit.image)}`;
               if (imageUrl) {
                 found = {
-                  id: hit.id,
-                  title: hit.title,
-                  author: hit.artist || suggestion.artist,
-                  year: hit.year || "Период неизвестен",
-                  imageUrl,
-                  museumDescription: '', // описание дозагрузим из Wikipedia на этапе обогащения
-                  medium: '',
-                  source: hit.source
+                  id: hit.id, title: hit.title, author: hit.artist || suggestion.artist,
+                  year: hit.year || "Период неизвестен", imageUrl,
+                  museumDescription: '', medium: '', source: hit.source
                 };
               }
             }
           }
-        } catch { /* каталог не критичен — упадём в живой поиск ниже */ }
+        } catch { /* каталог не критичен */ }
 
-        // === 1. ЖИВОЙ ПОИСК: THE MET (если в каталоге не нашлось) ===
+        // 1. Met
         if (!found) {
-          for (const query of queries) {
-            found = await searchMet(query, suggestion);
-            if (found) break;
-          }
+          for (const query of queries) { found = await searchMet(query, suggestion); if (found) break; }
         }
 
-        // === FALLBACK: TRY ART INSTITUTE OF CHICAGO ===
+        // 2. Art Institute of Chicago
         if (!found) {
           let matchedArt: MuseumArtwork | null = null;
-
           for (const query of queries) {
             if (matchedArt) break;
             try {
               const res = await fetch(`/api/museum/search?q=${encodeURIComponent(query)}&fields=id,title,artist_display,image_id,artwork_type_title,date_display`);
               if (!res.ok) continue;
-              const data = await res.json();
-              const results = (data.data || []) as MuseumArtwork[];
-
-              // Filter to find the first valid match with a working image
+              const results = ((await res.json()).data || []) as MuseumArtwork[];
               for (const a of results) {
                 if (!a.image_id) continue;
-                
-                const matchesTitle = titlesMatch(suggestion.title, a.title);
-
-                if (matchesTitle) { // Совпадение названия = совпадение сюжета
+                if (titlesMatch(suggestion.title, a.title)) {
                   const imageUrl = `/api/museum/image/${a.image_id}`;
-                  const isImageValid = await checkImage(imageUrl);
-                  if (isImageValid) {
-                    matchedArt = a;
-                    break;
-                  }
+                  if (await checkImage(imageUrl)) { matchedArt = a; break; }
                 }
               }
             } catch { continue; }
           }
-
           if (matchedArt) {
             const author = matchedArt.artist_display ? matchedArt.artist_display.split('\n')[0].trim() : suggestion.artist;
-
-            // Fetch Chicago detail
             let museumDescription = '';
             let medium = '';
             try {
               const detailRes = await fetch(`/api/museum/artwork/${matchedArt.id}`);
               if (detailRes.ok) {
-                const detailData = await detailRes.json();
-                const d = detailData.data;
+                const d = (await detailRes.json()).data;
                 if (d) {
-                  museumDescription = d.description || d.short_description || '';
+                  museumDescription = (d.description || d.short_description || '').replace(/<[^>]*>/g, '');
                   medium = d.medium_display || '';
-                  museumDescription = museumDescription.replace(/<[^>]*>/g, '');
                 }
               }
             } catch { /* continue */ }
-
             found = {
-              id: matchedArt.id,
-              title: matchedArt.title,
-              author,
+              id: matchedArt.id, title: matchedArt.title, author,
               year: matchedArt.date_display || "Период неизвестен",
               imageUrl: `/api/museum/image/${matchedArt.image_id}`,
-              museumDescription,
-              medium,
-              source: 'chicago'
+              museumDescription, medium, source: 'chicago'
             };
           }
         }
 
-        // === FALLBACK 2: TRY CLEVELAND MUSEUM OF ART ===
+        // 3. Cleveland
         if (!found) {
-          for (const query of queries) {
-            found = await searchCleveland(query, suggestion);
-            if (found) break;
-          }
+          for (const query of queries) { found = await searchCleveland(query, suggestion); if (found) break; }
         }
 
-        // === FALLBACK 3: TRY RIJKSMUSEUM (европейские шедевры: Rembrandt, Vermeer) ===
+        // 4. Rijksmuseum
         if (!found) {
-          for (const query of queries) {
-            found = await searchRijks(query, suggestion);
-            if (found) break;
-          }
+          for (const query of queries) { found = await searchRijks(query, suggestion); if (found) break; }
         }
 
-        if (!found) continue;
+        // 5. Victoria and Albert
+        if (!found) {
+          for (const query of queries) { found = await searchVA(query, suggestion); if (found) break; }
+        }
 
-        // Skip duplicates
-        const isDuplicate = newHistory.some(h => h.title.toLowerCase() === found!.title.toLowerCase());
-        if (isDuplicate) continue;
+        // 6. Wikimedia Commons (любая известная работа)
+        if (!found) {
+          found = await searchWiki(suggestion);
+        }
 
-        foundPaintings.push(found);
-        newHistory.push({ title: found.title, artist: found.author });
+        return found;
+      };
+
+      const foundPaintings: FoundPainting[] = [];
+      const newHistory = [...paintingHistory];
+
+      // Параллельный поиск: предложения обрабатываются батчами (быстрее, чем по
+      // одному), останавливаемся как только набрали 3 уникальные картины.
+      const BATCH = 4;
+      for (let i = 0; i < suggestions.length && foundPaintings.length < 3; i += BATCH) {
+        const batch = suggestions.slice(i, i + BATCH);
+        const results = await Promise.all(batch.map(s => findOnePainting(s)));
+        for (const found of results) {
+          if (foundPaintings.length >= 3) break;
+          if (!found) continue;
+          const t = found.title.toLowerCase();
+          // Дедупликация против истории и внутри текущей выборки.
+          if (newHistory.some(h => h.title.toLowerCase() === t)) continue;
+          if (foundPaintings.some(p => p.title.toLowerCase() === t)) continue;
+          foundPaintings.push(found);
+          newHistory.push({ title: found.title, artist: found.author });
+        }
       }
 
       if (foundPaintings.length === 0) {
